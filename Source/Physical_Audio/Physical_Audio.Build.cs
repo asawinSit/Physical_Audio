@@ -24,13 +24,7 @@ public class Physical_Audio : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[] { });
 
 		PublicIncludePaths.AddRange(new string[] {
-			"Physical_Audio",
-			"Physical_Audio/Variant_Horror",
-			"Physical_Audio/Variant_Horror/UI",
-			"Physical_Audio/Variant_Shooter",
-			"Physical_Audio/Variant_Shooter/AI",
-			"Physical_Audio/Variant_Shooter/UI",
-			"Physical_Audio/Variant_Shooter/Weapons"
+			"Physical_Audio"
 		});
 
 		// Uncomment if you are using Slate UI
