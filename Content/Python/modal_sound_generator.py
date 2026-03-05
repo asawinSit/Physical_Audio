@@ -30,12 +30,12 @@ from modal_mesh_utils import (
 # Table 1: "The sounds of physical shapes", Presence 7(4).
 # ─────────────────────────────────────────────────────────────────
 MATERIAL_PRESETS = {
-    "Metal":   {"E": 200e9,  "nu": 0.30, "rho": 7800, "xi": 0.003},
-    "Wood":    {"E": 12e9,   "nu": 0.35, "rho": 700,  "xi": 0.020},
-    "Glass":   {"E": 70e9,   "nu": 0.22, "rho": 2500, "xi": 0.001},
-    "Stone":   {"E": 60e9,   "nu": 0.25, "rho": 2700, "xi": 0.007},
-    "Plastic": {"E": 3e9,    "nu": 0.38, "rho": 1200, "xi": 0.030},
-    "Ceramic": {"E": 100e9,  "nu": 0.22, "rho": 2400, "xi": 0.002},
+    "Metal": {"E": 8e9,    "nu": 0.30, "rho": 7800, "xi": 0.008},
+    "Wood":    {"E": 12e9,   "nu": 0.35, "rho": 700,  "xi": 0.04},
+    "Glass":   {"E": 70e9,   "nu": 0.22, "rho": 2500, "xi": 0.005},
+    "Stone":   {"E": 60e9,   "nu": 0.25, "rho": 2700, "xi": 0.015},
+    "Plastic": {"E": 3e9,    "nu": 0.38, "rho": 1200, "xi": 0.05},
+    "Ceramic": {"E": 100e9,  "nu": 0.22, "rho": 2400, "xi": 0.008},
 }
 
 
@@ -386,55 +386,42 @@ def compute_vertex_participation(mode_shapes: np.ndarray,
 def compute_rayleigh_damping(frequencies_hz: np.ndarray,
                               material: str) -> np.ndarray:
     """
-    Computes per-mode damping ratios using Rayleigh damping.
-
-    Rayleigh (proportional) damping:
-      ξ_k = α/(2ω_k) + βω_k/2
-
-    where α (mass-proportional) and β (stiffness-proportional)
-    are calibrated so that the base material damping ratio ξ₀
-    is matched at the first and last mode frequencies.
-
-    Reference:
-      Caughey, T.K. (1960). "Classical Normal Modes in Damped
-      Linear Dynamic Systems." Journal of Applied Mechanics.
-
-      van den Doel & Pai (1998) provide the base ξ₀ values
-      per material from measured physical objects.
-
-    This gives physically meaningful frequency-dependent damping:
-    low modes decay more slowly, high modes faster — consistent
-    with real object behavior.
+    Computes per-mode damping ratios with enforced frequency dependence.
+    
+    For perceptually convincing impact sounds, high-frequency modes
+    must decay significantly faster than low-frequency modes.
+    This matches measured behavior of real objects where surface
+    waves and air coupling damp high modes more strongly.
+    
+    Reference: van den Doel & Pai (1998), eq. 4-5.
+    Rath & Rocchesso (2005): contact damping increases with frequency.
     """
     mat  = MATERIAL_PRESETS[material]
     xi_0 = mat["xi"]
-
+    
     omega = 2.0 * np.pi * frequencies_hz
-
-    if len(omega) < 2:
-        return np.full(len(omega), xi_0, dtype=np.float32)
-
-    # Calibrate α and β using first and last mode
-    w1, w2 = omega[0], omega[-1]
-
-    # System: [1/(2w1), w1/2] [α]   [ξ₀]
-    #         [1/(2w2), w2/2] [β] = [ξ₀]
-    A = np.array([
-        [1.0 / (2.0 * w1), w1 / 2.0],
-        [1.0 / (2.0 * w2), w2 / 2.0],
-    ])
-    b = np.array([xi_0, xi_0])
-
-    try:
-        alpha, beta = np.linalg.solve(A, b)
-    except np.linalg.LinAlgError:
-        # Fallback: uniform damping if calibration fails
-        unreal.log_warning("Rayleigh calibration failed, using uniform damping.")
-        return np.full(len(omega), xi_0, dtype=np.float32)
-
-    xi_per_mode = (alpha / (2.0 * omega)) + (beta * omega / 2.0)
-    xi_per_mode = np.clip(xi_per_mode, 0.0001, 0.3).astype(np.float32)
-
+    omega_min = omega[0]
+    omega_max = omega[-1]
+    
+    # Enforce meaningful range: high modes damp 5x faster than low modes
+    # This is the key perceptual parameter for impact sound character
+    xi_min = xi_0
+    xi_max = xi_0 * 5.0
+    
+    # Linear interpolation in log-frequency space
+    if omega_max > omega_min:
+        t = (np.log(omega) - np.log(omega_min)) / \
+            (np.log(omega_max) - np.log(omega_min))
+    else:
+        t = np.zeros_like(omega)
+    
+    xi_per_mode = xi_min + t * (xi_max - xi_min)
+    xi_per_mode = np.clip(xi_per_mode, 0.0001, 0.5).astype(np.float32)
+    
+    unreal.log(
+        f"Damping range: {xi_per_mode[0]:.4f} (mode 0) "
+        f"to {xi_per_mode[-1]:.4f} (mode {len(xi_per_mode)-1})")
+    
     return xi_per_mode
 
 
@@ -559,6 +546,36 @@ def generate_modal_asset(mesh_asset_path: str,
     vertices, faces, meta = extract_static_mesh(mesh_asset_path)
     if not validate_mesh_for_fem(vertices, faces):
         raise RuntimeError("Mesh validation failed. See warnings above.")
+
+# Adaptive subdivision based on mesh size and vertex density
+    # Target: ~300 surface vertices for accurate low-frequency modes
+    # Scale target with object volume — smaller objects need fewer verts
+    # because their modes are higher frequency and easier to capture
+    target_verts = 300
+    bbox_vol = meta['bbox_volume']
+    
+    # Reduce target for small objects (< 0.01 m³ = 10cm cube equivalent)
+    if bbox_vol < 0.01:
+        target_verts = 150
+    elif bbox_vol < 0.1:
+        target_verts = 200
+
+    if meta['n_surface_verts'] < target_verts:
+        # Calculate how many subdivisions needed
+        current = meta['n_surface_verts']
+        subs = 0
+        while current < target_verts and subs < 4:
+            current = current * 4  # each subdivision ~4x triangles
+            subs += 1
+        
+        unreal.log(
+            f"Mesh has {meta['n_surface_verts']} vertices "
+            f"(target {target_verts}) — subdividing {subs}x...")
+        from modal_mesh_utils import subdivide_surface_mesh
+        vertices, faces = subdivide_surface_mesh(
+            vertices, faces, subdivisions=subs)
+        meta['n_surface_verts'] = len(vertices)
+        meta['n_triangles']     = len(faces)
 
     # Stage 2: Tetrahedralize
     tet_nodes, tets, n_surface_verts = tetrahedralize(
