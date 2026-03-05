@@ -7,7 +7,7 @@
 		{
 			"Name": "Physical_Audio",
 			"Type": "Runtime",
-			"LoadingPhase": "Default",
+			"LoadingPhase": "PostEngineInit",
 			"AdditionalDependencies": [
 				"Engine",
 				"AIModule",

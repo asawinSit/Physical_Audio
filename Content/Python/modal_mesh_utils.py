@@ -191,3 +191,51 @@ def estimate_tet_volume_constraint(bbox_extent: np.ndarray,target_tets: int = 20
     # Clamp to avoid extremes
     max_vol = np.clip(max_vol, 1e-8, 1e-2)
     return float(max_vol)
+
+
+def subdivide_surface_mesh(vertices: np.ndarray,
+                            faces: np.ndarray,
+                            subdivisions: int = 3) -> tuple:
+    """
+    Midpoint subdivision of a triangle mesh.
+    Each pass splits every triangle into 4 smaller triangles.
+    
+    A cube with 8 verts/12 tris becomes:
+      subdivisions=1 →  26 verts /  48 tris
+      subdivisions=2 →  98 verts / 192 tris  
+      subdivisions=3 → 386 verts / 768 tris  ← use this for FEM
+    
+    More vertices = finer tet mesh = accurate low-frequency modes.
+    Reference: mesh refinement convergence in Ren et al. (2013).
+    """
+    for _ in range(subdivisions):
+        edge_midpoints = {}
+        new_vertices   = list(vertices)
+        new_faces      = []
+
+        def get_midpoint(i, j):
+            key = (min(i, j), max(i, j))
+            if key not in edge_midpoints:
+                edge_midpoints[key] = len(new_vertices)
+                new_vertices.append((vertices[i] + vertices[j]) / 2.0)
+            return edge_midpoints[key]
+
+        for tri in faces:
+            a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+            ab = get_midpoint(a, b)
+            bc = get_midpoint(b, c)
+            ca = get_midpoint(c, a)
+            new_faces += [
+                [a,  ab, ca],
+                [b,  bc, ab],
+                [c,  ca, bc],
+                [ab, bc, ca],
+            ]
+
+        vertices = np.array(new_vertices, dtype=np.float64)
+        faces    = np.array(new_faces,    dtype=np.int32)
+
+    unreal.log(
+        f"Subdivision complete: "
+        f"{len(vertices)} verts, {len(faces)} tris")
+    return vertices, faces

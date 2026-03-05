@@ -18,10 +18,18 @@ public class Physical_Audio : ModuleRules
 			"StateTreeModule",
 			"GameplayStateTreeModule",
 			"UMG",
-			"Slate"
+			"Slate",
+			"MetasoundFrontend"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		PrivateDependencyModuleNames.AddRange(new string[] { 
+			"MetasoundGenerator",
+			"MetasoundGraphCore",
+			"MetasoundStandardNodes",
+			"AudioExtensions",
+			"SignalProcessing",
+			"MetasoundEngine"
+		});
 
 		PublicIncludePaths.AddRange(new string[] {
 			"Physical_Audio"
