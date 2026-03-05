@@ -1,9 +1,13 @@
+// ============================================================================
+// ModalMetaSoundBridge.cpp
+// ============================================================================
+
 #include "ModalMetaSoundBridge.h"
+#include "OfflinePipeline/ModalSoundDataAsset.h"
 #include "Components/AudioComponent.h"
 #include "Kismet/GameplayStatics.h"
-#include "OfflinePipeline/ModalSoundDataAsset.h"
 
-UModalMetaSoundBridge::UModalMetaSoundBridge(): ModalSoundAsset(nullptr), AttenuationSettings(nullptr)
+UModalMetaSoundBridge::UModalMetaSoundBridge()
 {
     PrimaryComponentTick.bCanEverTick = false;
 }
@@ -12,92 +16,92 @@ void UModalMetaSoundBridge::BeginPlay()
 {
     Super::BeginPlay();
 
-    ImpactComponent =
-        GetOwner()->FindComponentByClass<UModalImpactComponent>();
-
-    if (!ImpactComponent)
+    ImpactComp = GetOwner()->FindComponentByClass<UModalImpactComponent>();
+    if (!ImpactComp)
     {
         UE_LOG(LogTemp, Warning,
-            TEXT("ModalMetaSoundBridge: No ModalImpactComponent on '%s'"),
+            TEXT("[ModalBridge] '%s': No ModalImpactComponent found. "
+                 "Add one to the same actor."),
             *GetOwner()->GetName());
         return;
     }
 
-    ImpactComponent->OnModalImpact.AddDynamic(
-        this, &UModalMetaSoundBridge::HandleModalImpact);
+    ImpactComp->OnModalImpact.AddDynamic(
+        this, &UModalMetaSoundBridge::HandleImpact);
 
-    UE_LOG(LogTemp, Log,
-        TEXT("ModalMetaSoundBridge ready on '%s'."),
-        *GetOwner()->GetName());
+    UE_LOG(LogTemp, Log, TEXT("[ModalBridge] '%s' ready"),
+           *GetOwner()->GetName());
 }
 
-void UModalMetaSoundBridge::HandleModalImpact(
+void UModalMetaSoundBridge::HandleImpact(
     FVector               ImpactPoint,
     float                 KineticEnergy,
+    float                 RelativeSpeed,
     int32                 VertexIndex,
-    UModalSoundDataAsset* DataAsset)
+    UModalSoundDataAsset* DataAsset,
+    FVector               ImpactNormal)
 {
-    if (!ModalSoundAsset || !DataAsset || !ImpactComponent) return;
+    if (!ModalSoundAsset || !DataAsset || !ImpactComp) return;
+
+    // ── Compute per-mode amplitudes ───────────────────────────────────────
+    // ComputeModeAmplitudes applies the full physical amplitude model:
+    //   φ_k(vertex) × √(KE/KE_max) × η_k × F_k(speed) × jitter
+    // where F_k is the Hertz contact spectral weight computed from the
+    // actual impact speed RelativeSpeed (Chadwick et al. 2012).
+    TArray<float> Amplitudes = ImpactComp->ComputeModeAmplitudes(
+        VertexIndex, KineticEnergy, RelativeSpeed, ImpactNormal);
+
+    // ── Build parameter arrays ────────────────────────────────────────────
+    int32 N = FMath::Min(DataAsset->Modes.Num(), MaxModes);
+
+    TArray<float> Freqs, Amps, Damps;
+    Freqs.SetNum(N); Amps.SetNum(N); Damps.SetNum(N);
+
+    for (int32 k = 0; k < N; ++k)
+    {
+        const FModalMode& M = DataAsset->Modes[k];
+        Freqs[k] = M.Frequency;
+        Damps[k] = M.DampingRatio;
+        Amps[k]  = Amplitudes.IsValidIndex(k) ? Amplitudes[k] : 0.f;
+    }
 
     UE_LOG(LogTemp, Log,
-        TEXT("ModalBridge: Spawning sound. energy=%.3f vertex=%d"),
-        KineticEnergy, VertexIndex);
+        TEXT("[ModalBridge] KE=%.1f J speed=%.2f m/s vtx=%d "
+             "modes=%d Amp[0]=%.4f"),
+        KineticEnergy, RelativeSpeed, VertexIndex, N,
+        Amps.Num() > 0 ? Amps[0] : 0.f);
 
-    // Compute per-mode amplitudes from vertex participation * kinetic energy
-    TArray<float> Amplitudes =
-        ImpactComponent->ComputeModeAmplitudes(VertexIndex, KineticEnergy);
+    // ── Spawn spatialized audio at impact location ────────────────────────
+    // SpawnSoundAtLocation creates a UAudioComponent at ImpactPoint in
+    // world space, using AttenuationSettings for 3D audio.
+    // bAutoDestroy=true ensures cleanup after the MetaSound finishes.
+    UAudioComponent* Audio = UGameplayStatics::SpawnSoundAtLocation(
+        GetWorld(),
+        ModalSoundAsset,
+        ImpactPoint,
+        FRotator::ZeroRotator,
+        1.f,   // VolumeMultiplier — use MasterGain parameter instead
+        1.f,   // PitchMultiplier
+        0.f,   // StartTime
+        AttenuationSettings,
+        nullptr,
+        true); // bAutoDestroy
 
-    // Spawn a short broadband thud at the impact point
-    // This provides the low-frequency transient that modal synthesis lacks
-    if (ImpactThudSound)
+    if (!Audio)
     {
-        UGameplayStatics::SpawnSoundAtLocation(
-            GetWorld(), ImpactThudSound, ImpactPoint,
-            FRotator::ZeroRotator, 
-            FMath::Clamp(KineticEnergy / 5000, 0.1f, 1.0f),
-            1.0f, 0.f, AttenuationSettings);
+        UE_LOG(LogTemp, Warning,
+            TEXT("[ModalBridge] SpawnSoundAtLocation returned null. "
+                 "Check ModalSoundAsset is assigned and valid."));
+        return;
     }
 
-    // Spawn the MetaSound at the impact point (spatialized)
-    UAudioComponent* AudioComp =
-        UGameplayStatics::SpawnSoundAtLocation(
-            GetWorld(), ModalSoundAsset, ImpactPoint,
-            FRotator::ZeroRotator, 1.f, 1.f, 0.f,
-            AttenuationSettings,
-            nullptr, true);
-
-    if (!AudioComp) return;
-
-    // Build the three parameter arrays
-    int32 NumModes = FMath::Min(DataAsset->Modes.Num(), MaxModes);
-
-    TArray<float> Frequencies, Amps, Dampings;
-    Frequencies.SetNum(NumModes);
-    Amps.SetNum(NumModes);
-    Dampings.SetNum(NumModes);
-
-    for (int32 k = 0; k < NumModes; ++k)
-    {
-        const FModalMode& Mode = DataAsset->Modes[k];
-        Frequencies[k] = Mode.Frequency;
-        Dampings[k]    = Mode.DampingRatio;
-        Amps[k]        = k < Amplitudes.Num() ? Amplitudes[k] : 0.f;
-    }
-
-    // Set parameters on the MetaSound — names must match
-    // the Graph Input names you promoted in MS_ModalImpact
-    AudioComp->SetFloatArrayParameter(FName("Frequencies"), Frequencies);
-    AudioComp->SetFloatArrayParameter(FName("Amplitudes"),  Amps);
-    AudioComp->SetFloatArrayParameter(FName("DampingRatios"), Dampings);
-    AudioComp->SetFloatParameter     (FName("MasterGain"),  1.0f);
-
-    // Fire the trigger to start synthesis
-    AudioComp->SetTriggerParameter(FName("Trigger"));
-
-    UE_LOG(LogTemp, Log, 
-    TEXT("Bridge: %d modes, Freq[0]=%.1f Amp[0]=%.6f Damp[0]=%.6f"),
-    NumModes, 
-    Frequencies.Num() > 0 ? Frequencies[0] : 0.f,
-    Amps.Num() > 0 ? Amps[0] : 0.f,
-    Dampings.Num() > 0 ? Dampings[0] : 0.f);
+    // ── Set MetaSound parameters ──────────────────────────────────────────
+    // IMPORTANT: All value parameters must be set BEFORE Trigger.
+    // The MetaSound node reads parameter values at the trigger event.
+    // Setting Trigger first means the node reads the previous frame's values.
+    Audio->SetFloatArrayParameter(FName("Frequencies"),   Freqs);
+    Audio->SetFloatArrayParameter(FName("Amplitudes"),    Amps);
+    Audio->SetFloatArrayParameter(FName("DampingRatios"), Damps);
+    Audio->SetFloatParameter     (FName("MasterGain"),    MasterGain);
+    Audio->SetTriggerParameter   (FName("Trigger"));      // MUST be last
 }
