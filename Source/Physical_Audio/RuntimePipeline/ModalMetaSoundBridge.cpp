@@ -71,6 +71,24 @@ void UModalMetaSoundBridge::HandleImpact(
         KineticEnergy, RelativeSpeed, VertexIndex, N,
         Amps.Num() > 0 ? Amps[0] : 0.f);
 
+    // In HandleImpact, after building Freqs array:
+    // Perceptual pitch scaling by object volume.
+    // Listeners associate larger objects with lower pitch.
+    // Scaling: f_perceived = f_computed * (V_ref / V_object)^(1/3)
+    // Reference: Grassi (2005) "Do we hear size or sound?"
+    //            Perception 34(9): 1063–1075.
+    float ObjectVolume = FMath::Max(DataAsset->MeshVolume, 0.001f);
+    float RefVolume    = 0.001f;  // 10cm cube reference
+    float PitchScale   = FMath::Pow(RefVolume / ObjectVolume, 0.2f);
+    PitchScale         = FMath::Clamp(PitchScale, 0.3f, 1.0f);
+
+    for (float& F : Freqs) F *= PitchScale;
+
+    // Longer decay for larger objects (more mass = slower energy dissipation)
+    float DecayScale = FMath::Pow(ObjectVolume / RefVolume, 0.15f);
+    DecayScale       = FMath::Clamp(DecayScale, 1.0f, 4.0f);
+    for (float& D : Damps) D /= DecayScale;  // lower damping = longer decay
+    
     // ── Spawn spatialized audio at impact location ────────────────────────
     // SpawnSoundAtLocation creates a UAudioComponent at ImpactPoint in
     // world space, using AttenuationSettings for 3D audio.
@@ -103,5 +121,7 @@ void UModalMetaSoundBridge::HandleImpact(
     Audio->SetFloatArrayParameter(FName("Amplitudes"),    Amps);
     Audio->SetFloatArrayParameter(FName("DampingRatios"), Damps);
     Audio->SetFloatParameter     (FName("MasterGain"),    MasterGain);
+    float ContactGain = FMath::Clamp(RelativeSpeed / 8.0f, 0.05f, 0.6f);
+    Audio->SetFloatParameter(FName("ContactGain"), ContactGain);
     Audio->SetTriggerParameter   (FName("Trigger"));      // MUST be last
 }

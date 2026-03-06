@@ -265,3 +265,43 @@ def subdivide_surface_mesh(vertices: np.ndarray,
                    f"{len(vertices)} verts, {len(faces)} tris")
 
     return vertices, faces
+
+def repair_mesh_for_fem(vertices: np.ndarray,
+                         faces:    np.ndarray) -> tuple:
+    """
+    Repairs self-intersections, non-manifold edges, and holes using
+    pymeshfix (MeshFix v2.1, Attene 2010).
+
+    This handles Megascans and other photogrammetry meshes which commonly
+    have self-intersections from the reconstruction process.
+    pymeshfix removes all defects while leaving clean regions unmodified
+    and outputs a single watertight triangle mesh.
+
+    Install: pip install pymeshfix --break-system-packages
+
+    Reference: Attene, M. (2010). "A lightweight approach to repairing
+    digitized polygon meshes." The Visual Computer, 26(11), 1393–1406.
+    """
+    try:
+        import pymeshfix
+    except ImportError:
+        unreal.log_warning(
+            "[Repair] pymeshfix not installed. "
+            "Run: pip install pymeshfix --break-system-packages\n"
+            "Skipping repair — TetGen may fail.")
+        return vertices, faces
+
+    unreal.log(f"[Repair] Repairing mesh: {len(vertices)} verts, "
+               f"{len(faces)} faces...")
+
+    v_clean, f_clean = pymeshfix.clean_from_arrays(
+        vertices.astype(np.float64),
+        faces.astype(np.int32))
+
+    v_clean = np.array(v_clean, dtype=np.float64)
+    f_clean = np.array(f_clean, dtype=np.int32)
+
+    unreal.log(f"[Repair] Repaired: {len(v_clean)} verts, "
+               f"{len(f_clean)} faces "
+               f"(was {len(vertices)}/{len(faces)})")
+    return v_clean, f_clean

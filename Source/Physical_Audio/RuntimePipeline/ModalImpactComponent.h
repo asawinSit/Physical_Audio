@@ -173,6 +173,17 @@ public:
                                          float   RelativeSpeed,
                                          FVector ImpactNormal) const;
 
+	/**
+	 * Minimum fraction of relative velocity that must be along the contact
+	 * normal to count as an impact rather than sliding.
+	 * Range 0.0–1.0. Default 0.30 means at least 30% normal component.
+	 * Raise if sliding still triggers sounds. Lower if glancing impacts
+	 * are being missed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
+			  meta=(ClampMin="0.0", ClampMax="1.0"))
+	float MinNormalFraction = 0.30f;
+
 protected:
     virtual void BeginPlay() override;
     virtual void TickComponent(float DeltaTime, ELevelTick TickType,
@@ -196,7 +207,7 @@ private:
      * Already converted to m/s in TickComponent.
      * Used to compute KE = ½mv² without relying on the noisy impulse vector.
      */
-    FVector PreImpactVel = FVector::ZeroVector;
+	FVector PreImpactVelocity = FVector::ZeroVector;
 
     float LastImpactTime = -999.f;
 };

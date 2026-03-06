@@ -644,6 +644,15 @@ def generate_modal_asset(mesh_asset_path: str,
     if not validate_mesh_for_fem(vertices, faces):
         raise RuntimeError("Mesh validation failed.")
 
+    # Stage 1.5: Automatic mesh repair (handles Megascans self-intersections)
+    from modal_mesh_utils import repair_mesh_for_fem
+    vertices, faces = repair_mesh_for_fem(vertices, faces)
+    meta["n_surface_verts"] = len(vertices)
+    meta["n_triangles"]     = len(faces)
+    # Re-validate after repair
+    if not validate_mesh_for_fem(vertices, faces):
+        raise RuntimeError("Mesh still invalid after repair.")
+
     # Stage 2 — adaptive subdivision
     bbox_vol     = meta["bbox_volume"]
     target_verts = 300

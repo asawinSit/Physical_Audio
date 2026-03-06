@@ -25,10 +25,10 @@
 #include "StaticMeshResources.h"
 #include "OfflinePipeline/ModalSoundDataAsset.h"
 
-UModalImpactComponent::UModalImpactComponent()
+UModalImpactComponent::UModalImpactComponent(): ModalDataAsset(nullptr)
 {
     // Tick is required to cache pre-impact velocity each frame.
-    PrimaryComponentTick.bCanEverTick        = true;
+    PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
 }
 
@@ -76,14 +76,19 @@ void UModalImpactComponent::TickComponent(
 {
     Super::TickComponent(DeltaTime, TickType, Fn);
 
-    // Cache physics velocity BEFORE any collision this frame.
-    // OnComponentHit fires after the impulse is resolved, so by that
-    // point the velocity has already changed. Caching here gives us the
-    // true pre-impact velocity for an accurate KE = ½mv² calculation.
-    // UE returns cm/s — convert to m/s for SI units.
     if (OwnerMesh && OwnerMesh->IsSimulatingPhysics())
     {
-        PreImpactVel = OwnerMesh->GetPhysicsLinearVelocity() * 0.01f;
+        FVector CurrentVel = OwnerMesh->GetPhysicsLinearVelocity() * 0.01f;
+
+        // Only update the cache if the body is actually moving.
+        // If the physics body is sleeping or nearly stopped, zero the cache
+        // so that resting-contact micro-hits compute KE = 0 and are filtered.
+        FBodyInstance* Body = OwnerMesh->GetBodyInstance();
+        bool bAwakeAndMoving = Body
+            && Body->IsInstanceAwake()
+            && CurrentVel.SizeSquared() > 0.0001f; // > 1 cm/s
+
+        PreImpactVelocity = bAwakeAndMoving ? CurrentVel : FVector::ZeroVector;
     }
 }
 
@@ -237,32 +242,72 @@ void UModalImpactComponent::OnHit(
     const FHitResult&    Hit)
 {
     if (!ModalDataAsset) return;
+    if (OtherActor && OtherActor->IsA(APawn::StaticClass())) return;
+
+    // Sleep check — resting contact micro-corrections
+    if (HitComp)
+    {
+        FBodyInstance* Body = HitComp->GetBodyInstance();
+        if (Body && !Body->IsInstanceAwake()) return;
+    }
 
     float Now = GetWorld()->GetTimeSeconds();
     if (Now - LastImpactTime < ImpactCooldown) return;
 
-    // ── Compute KE from pre-impact velocity ──────────────────────────────
-    // PreImpactVel is in m/s (converted in Tick from UE's cm/s).
-    // This is more reliable than NormalImpulse which varies with physics
-    // sub-stepping. Velocity is always well-defined at the tick boundary.
-    float Speed = PreImpactVel.Size();
-    float Mass  = 1.f;
+    // ── Relative velocity decomposition ──────────────────────────────────
+    // Split the relative velocity between the two bodies into:
+    //   NormalSpeed    — component along the contact normal (approach speed)
+    //   TangentialSpeed — component perpendicular to normal (sliding speed)
+    //
+    // A real impact has high NormalSpeed and low-to-zero TangentialSpeed.
+    // Sliding contact has near-zero NormalSpeed and high TangentialSpeed.
+    //
+    // We only trigger impact sound if NormalSpeed exceeds a threshold
+    // relative to TangentialSpeed. The ratio check ensures that even a
+    // fast-sliding object does not trigger impact sounds.
+    //
+    // Reference: this decomposition is standard in contact mechanics
+    // (Johnson 1985) and used in game audio practice to distinguish
+    // impact from scrape excitation (Rath & Rocchesso 2005).
+
+    FVector OtherVel = FVector::ZeroVector;
+    if (OtherComp && OtherComp->IsSimulatingPhysics())
+        OtherVel = OtherComp->GetPhysicsLinearVelocity() * 0.01f;
+
+    FVector RelVel      = PreImpactVelocity - OtherVel;
+    FVector ContactNorm = Hit.ImpactNormal;
+
+    // Project relative velocity onto contact normal
+    float NormalSpeed      = FMath::Abs(FVector::DotProduct(RelVel, ContactNorm));
+    // Remaining component is tangential (sliding)
+    float TangentialSpeed  = (RelVel - ContactNorm * NormalSpeed).Size();
+
+    // Reject if this is predominantly sliding:
+    // NormalSpeed must be at least 30% of total relative speed,
+    // AND must exceed a minimum threshold to exclude micro-vibrations.
+    float TotalSpeed = RelVel.Size();
+    if (TotalSpeed < 0.05f) return;  // too slow to matter
+
+    float NormalFraction = NormalSpeed / FMath::Max(TotalSpeed, 0.001f);
+    if (NormalFraction < MinNormalFraction) return;
+
+    // KE from normal approach speed only — tangential motion does not
+    // contribute to the compressive impact that excites modal vibration
+    float Mass = 1.f;
     if (HitComp && HitComp->IsSimulatingPhysics())
     {
         FBodyInstance* Body = HitComp->GetBodyInstance();
         if (Body) Mass = FMath::Max(Body->GetBodyMass(), 0.001f);
     }
-    float KE = 0.5f * Mass * Speed * Speed;
 
+    float KE = 0.5f * Mass * NormalSpeed * NormalSpeed;
     if (KE < MinImpactEnergy) return;
-    LastImpactTime = Now;
 
+    LastImpactTime = Now;
     int32 Vertex = FindClosestVertex(Hit.ImpactPoint);
 
-    UE_LOG(LogTemp, Verbose,
-        TEXT("[ModalImpact] KE=%.1f J speed=%.2f m/s vertex=%d"),
-        KE, Speed, Vertex);
-
+    // Pass NormalSpeed as RelativeSpeed for Hertz contact shaping —
+    // only the normal component drives the contact force pulse duration
     OnModalImpact.Broadcast(
-        Hit.ImpactPoint, KE, Speed, Vertex, ModalDataAsset, Hit.ImpactNormal);
+        Hit.ImpactPoint, KE, NormalSpeed, Vertex, ModalDataAsset, Hit.ImpactNormal);
 }
