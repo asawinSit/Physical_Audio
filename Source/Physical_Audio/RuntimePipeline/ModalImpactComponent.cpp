@@ -2,32 +2,46 @@
 // ModalImpactComponent.cpp
 // ============================================================================
 //
-// See ModalImpactComponent.h for full scientific documentation.
-//
 // KEY CHANGES FROM PREVIOUS VERSION:
-//   1. Velocity-based KE: ½mv² from cached pre-impact velocity (in Tick)
-//      instead of NormalImpulse-derived estimate. More stable ±5% vs ±30%.
 //
-//   2. Hertz contact spectral weight F_k computed per-impact from actual
-//      impact speed (was previously baked offline at a fixed speed).
-//      This makes gentle taps sound soft/low and hard slams sound sharp.
-//      Reference: Chadwick, Zheng & James (2012) §3.1.
+// 1. VERTEX INDEX FIX (critical correctness fix):
+//    FindClosestVertex now searches DataAsset->FEMSurfaceVertexPositions
+//    instead of a cached copy of the render mesh LOD0.
 //
-//   3. Delegate includes RelativeSpeed so the bridge can also use it.
+//    Root cause of old bug: after mesh subdivision the FEM surface mesh has
+//    many more vertices than the render mesh (e.g. 386 vs 8 for a cube).
+//    The old code searched 8 render verts, returned an index in [0,7], then
+//    used it to index VertexParticipation which has 386 entries. Every impact
+//    on every part of the cube sounded identical because it always read from
+//    the first 8 participation values. Spatial impact variation was silent.
 //
-//   4. Jitter uses a stable per-impact seed to avoid correlated noise
-//      across modes (previous code had correlated sin jitter).
+//    Fix: BuildVertexCache() is removed. At BeginPlay we just verify the
+//    DataAsset has FEMSurfaceVertexPositions. FindClosestVertex searches that
+//    array, which is indexed identically to VertexParticipation.
+//
+// 2. CONTACT HARDNESS FROM DATAASSET:
+//    BeginPlay reads DataAsset->ContactHardness into the component property.
+//    The Blueprint override is still respected — setting ContactHardness
+//    in the Details panel after BeginPlay overrides the DataAsset value.
+//
+// 3. SLIDING DELEGATE:
+//    OnHit now additionally tracks sliding contacts (NormalFraction < threshold
+//    but TangentialSpeed is meaningful). TickComponent broadcasts OnModalSlide
+//    each tick while sliding is active, using a one-pole smoothed speed.
+//    The scrape sound fades in and out naturally as the object moves.
+//
+// 4. SCRAPE AMPLITUDES:
+//    ComputeScrapeAmplitudes uses DragSensitivity from the DataAsset, which
+//    encodes low-frequency emphasis appropriate for friction excitation.
 // ============================================================================
 
 #include "ModalImpactComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
-#include "StaticMeshResources.h"
 #include "OfflinePipeline/ModalSoundDataAsset.h"
 
 UModalImpactComponent::UModalImpactComponent(): ModalDataAsset(nullptr)
 {
-    // Tick is required to cache pre-impact velocity each frame.
     PrimaryComponentTick.bCanEverTick = true;
     PrimaryComponentTick.bStartWithTickEnabled = true;
 }
@@ -44,6 +58,13 @@ void UModalImpactComponent::BeginPlay()
         return;
     }
 
+    // Read material contact hardness from the DataAsset.
+    // This ensures the Hertz shaping always matches the material that was
+    // used to generate the asset, without requiring manual override.
+    // Blueprint override still works — set ContactHardness in Details panel
+    // after the game has started if you want to deviate from the asset value.
+    ContactHardness = ModalDataAsset->ContactHardness;
+
     OwnerMesh = Cast<UPrimitiveComponent>(
         GetOwner()->GetComponentByClass(UStaticMeshComponent::StaticClass()));
 
@@ -58,16 +79,26 @@ void UModalImpactComponent::BeginPlay()
     OwnerMesh->SetNotifyRigidBodyCollision(true);
     OwnerMesh->OnComponentHit.AddDynamic(this, &UModalImpactComponent::OnHit);
 
-    BuildVertexCache();
+    // Validate that FEM vertex positions were stored by the pipeline.
+    int32 FEMVerts = ModalDataAsset->FEMSurfaceVertexPositions.Num();
+    if (FEMVerts == 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[ModalImpact] '%s': DataAsset has no FEMSurfaceVertexPositions. "
+                 "Regenerate the DataAsset with the updated pipeline. "
+                 "FindClosestVertex will always return vertex 0."),
+            *GetOwner()->GetName());
+    }
 
     UE_LOG(LogTemp, Log,
-        TEXT("[ModalImpact] '%s' ready: %d modes, %d cached verts, "
-             "MinKE=%.1f J, MaxKE=%.1f J"),
+        TEXT("[ModalImpact] '%s' ready: %d modes, %d FEM verts, "
+             "ContactHardness=%.2f, ContactDurationScale=%.2f, MinKE=%.1f J"),
         *GetOwner()->GetName(),
         ModalDataAsset->Modes.Num(),
-        CachedVerts.Num(),
-        MinImpactEnergy,
-        MaxImpactEnergy);
+        FEMVerts,
+        ContactHardness,
+        ContactDurationScale,
+        MinImpactEnergy);
 }
 
 void UModalImpactComponent::TickComponent(
@@ -76,75 +107,102 @@ void UModalImpactComponent::TickComponent(
 {
     Super::TickComponent(DeltaTime, TickType, Fn);
 
-    if (OwnerMesh && OwnerMesh->IsSimulatingPhysics())
+    if (!OwnerMesh || !OwnerMesh->IsSimulatingPhysics()) return;
+
+    // Cache pre-impact velocity for the next OnHit event.
+    FVector CurrentVel = OwnerMesh->GetPhysicsLinearVelocity() * 0.01f; // cm→m
+
+    FBodyInstance* Body = OwnerMesh->GetBodyInstance();
+    bool bAwake = Body && Body->IsInstanceAwake()
+                       && CurrentVel.SizeSquared() > 0.0001f;
+
+    PreImpactVelocity = bAwake ? CurrentVel : FVector::ZeroVector;
+
+    // ── Slide tick ────────────────────────────────────────────────────────
+    // If OnHit detected a sliding contact recently, maintain the slide state
+    // and broadcast OnModalSlide each tick with smoothed speed.
+    // We consider sliding "active" if OnHit has fired within the last 0.1 s
+    // with a sliding classification (tracked via LastSlideTime).
+    float Now = GetWorld()->GetTimeSeconds();
+    bool bSlidingRecently = (Now - LastSlideTime) < 0.10f;
+
+    if (bSlidingRecently && ModalDataAsset && bAwake)
     {
-        FVector CurrentVel = OwnerMesh->GetPhysicsLinearVelocity() * 0.01f;
+        // Use current tangential speed (velocity projected onto last contact plane)
+        FVector Vel     = PreImpactVelocity;
+        float Normal    = FVector::DotProduct(Vel, LastContactNormal);
+        FVector TanVel  = Vel - LastContactNormal * Normal;
+        float TanSpeed  = TanVel.Size();
 
-        // Only update the cache if the body is actually moving.
-        // If the physics body is sleeping or nearly stopped, zero the cache
-        // so that resting-contact micro-hits compute KE = 0 and are filtered.
-        FBodyInstance* Body = OwnerMesh->GetBodyInstance();
-        bool bAwakeAndMoving = Body
-            && Body->IsInstanceAwake()
-            && CurrentVel.SizeSquared() > 0.0001f; // > 1 cm/s
+        // One-pole smoothing to avoid crackling from frame-to-frame variation.
+        SmoothedSlideSpeed = FMath::Lerp(SmoothedSlideSpeed, TanSpeed, SlideSmoothing);
 
-        PreImpactVelocity = bAwakeAndMoving ? CurrentVel : FVector::ZeroVector;
+        if (SmoothedSlideSpeed > MinSlideSpeed)
+        {
+            // Normal force proxy: |normal velocity component| × mass.
+            // Heavier pressing = louder scrape.
+            float Mass = 1.f;
+            if (Body) Mass = FMath::Max(Body->GetBodyMass(), 0.001f);
+            float NormalForce = FMath::Clamp(
+                FMath::Abs(Normal) * Mass / FMath::Max(MaxImpactEnergy, 1.f),
+                0.f, 1.f);
+
+            if (!bIsSliding)
+            {
+                bIsSliding = true;
+                UE_LOG(LogTemp, Verbose,
+                    TEXT("[ModalImpact] '%s' slide start, speed=%.2f m/s"),
+                    *GetOwner()->GetName(), SmoothedSlideSpeed);
+            }
+
+            OnModalSlide.Broadcast(
+                SmoothedSlideSpeed, NormalForce,
+                LastContactPoint, ModalDataAsset, LastSlideVertex);
+        }
+        else
+        {
+            // Speed has dropped below threshold — end slide
+            if (bIsSliding)
+            {
+                bIsSliding = false;
+                SmoothedSlideSpeed = 0.f;
+                // Broadcast one final tick at zero speed so the bridge can fade out
+                OnModalSlide.Broadcast(
+                    0.f, 0.f, LastContactPoint, ModalDataAsset, LastSlideVertex);
+            }
+        }
     }
-}
-
-void UModalImpactComponent::BuildVertexCache()
-{
-    if (!ModalDataAsset) return;
-
-    UStaticMesh* Mesh = nullptr;
-    if (ModalDataAsset->SourceMesh.IsValid())
-        Mesh = ModalDataAsset->SourceMesh.LoadSynchronous();
-
-    // Fall back to the StaticMeshComponent's mesh if SourceMesh not set.
-    if (!Mesh)
+    else
     {
-        UStaticMeshComponent* SMC =
-            Cast<UStaticMeshComponent>(OwnerMesh);
-        if (SMC) Mesh = SMC->GetStaticMesh();
+        // No recent contact — end slide if active
+        if (bIsSliding)
+        {
+            bIsSliding = false;
+            SmoothedSlideSpeed = 0.f;
+            OnModalSlide.Broadcast(
+                0.f, 0.f, LastContactPoint, ModalDataAsset, LastSlideVertex);
+        }
     }
-
-    if (!Mesh || !Mesh->HasValidRenderData())
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("[ModalImpact] No valid render data for vertex cache."));
-        return;
-    }
-
-    const FStaticMeshLODResources& LOD =
-        Mesh->GetRenderData()->LODResources[0];
-    const FPositionVertexBuffer& PBuf =
-        LOD.VertexBuffers.PositionVertexBuffer;
-
-    int32 N = PBuf.GetNumVertices();
-    CachedVerts.SetNum(N);
-    for (int32 i = 0; i < N; ++i)
-    {
-        FVector3f P = PBuf.VertexPosition(i);
-        CachedVerts[i] = FVector(P.X, P.Y, P.Z);  // local space, cm
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("[ModalImpact] Vertex cache: %d verts"), N);
 }
 
 int32 UModalImpactComponent::FindClosestVertex(FVector WorldPos) const
 {
-    if (CachedVerts.Num() == 0) return 0;
+    if (!ModalDataAsset) return 0;
+    const TArray<FVector>& FEMVerts = ModalDataAsset->FEMSurfaceVertexPositions;
+    if (FEMVerts.Num() == 0) return 0;
 
-    // Convert world position to actor local space for comparison with
-    // render-mesh vertices (which are in local/component space, cm).
+    // Transform world-space hit point into actor local space.
+    // FEM vertices are stored in local space in METRES.
+    // UE5 actor local space is in centimetres, so we also divide by 100.
     FVector LocalPos =
-        GetOwner()->GetActorTransform().InverseTransformPosition(WorldPos);
+        GetOwner()->GetActorTransform().InverseTransformPosition(WorldPos)
+        * 0.01f;  // cm → m to match FEM vertex scale
 
-    int32 Best = 0;
+    int32 Best  = 0;
     float BestD = FLT_MAX;
-    for (int32 i = 0; i < CachedVerts.Num(); ++i)
+    for (int32 i = 0; i < FEMVerts.Num(); ++i)
     {
-        float D = FVector::DistSquared(LocalPos, CachedVerts[i]);
+        float D = FVector::DistSquared(LocalPos, FEMVerts[i]);
         if (D < BestD) { BestD = D; Best = i; }
     }
     return Best;
@@ -159,36 +217,31 @@ TArray<float> UModalImpactComponent::ComputeModeAmplitudes(
     TArray<float> Amps;
     if (!ModalDataAsset) return Amps;
 
-    // ── Energy scale: √(KE/KE_max) ─────────────────────────────────────
-    // Klatzky, Pai & Krotkov (2000) "Perception of Material from Contact
-    // Sounds" established that perceived loudness ∝ √(contact force).
-    // Using √(KE/KE_max) maps physical energy to perceptual loudness.
-    float Energy     = FMath::Clamp(KineticEnergy, 0.f, MaxImpactEnergy);
+    // ── Energy scale: √(KE/KE_max) ──────────────────────────────────────
+    // Perceived loudness ∝ √(contact force). Klatzky et al. (2000).
+    float Energy      = FMath::Clamp(KineticEnergy, 0.f, MaxImpactEnergy);
     float EnergyScale = FMath::Sqrt(Energy / FMath::Max(MaxImpactEnergy, 1.f));
 
-    // ── Hertz contact duration T_c ──────────────────────────────────────
-    // From Hertz contact theory (Johnson 1985, §3.4):
-    //   T_c = C_mat / (v_impact)^0.2
-    // where C_mat is a material constant proportional to 1/sqrt(hardness).
-    // We use a reference speed of 3 m/s (typical drop impact).
+    // ── Hertz contact duration T_c ───────────────────────────────────────
+    // T_c = C_mat / v^0.2   (Johnson 1985, §3.4; Chadwick et al. 2012, eq.4–5)
+    // C_mat encodes material stiffness via ContactHardness (from DataAsset).
     //
-    // Physically: faster impacts compress the contact zone more quickly,
-    // producing a shorter pulse → more high-frequency content.
-    // Slower impacts produce longer pulses → predominantly low-frequency.
+    // ContactDurationScale multiplies C_mat to model contact GEOMETRY:
+    //   - Broad surface contact (face):    scale ≈ 1.0  (long T_c, more sinc rolloff)
+    //   - Edge or point contact (plank):   scale ≈ 0.35 (short T_c, more HF content)
     //
-    // Chadwick et al. (2012) eq. 4–5: the contact duration for a sphere-
-    // on-plane impact is T_c = 2.87(m/k_eff)^0.4. We parameterize this
-    // as C_mat / v^0.2 which matches the velocity dependence.
+    // Perceptually: shorter T_c → sinc zero at higher frequency → more high-
+    // frequency modes are excited → impact sounds harder and crisper.
+    // ContactHardness alone is insufficient because its effect on C_mat is
+    // dampened by the sqrt, whereas ContactDurationScale scales C_mat directly.
     float SpeedSafe = FMath::Max(RelativeSpeed, 0.1f);
-    float C_mat     = 0.0025f / FMath::Sqrt(FMath::Max(ContactHardness, 0.01f));
-    // T_c in seconds — typically 0.5–5 ms for metal/stone on hard floors
+    float C_mat     = (0.0025f / FMath::Sqrt(FMath::Max(ContactHardness, 0.01f)))
+                      * FMath::Max(ContactDurationScale, 0.05f);
     float T_c       = C_mat / FMath::Pow(SpeedSafe, 0.2f);
 
-    // ── Per-impact random seed ──────────────────────────────────────────
-    // Models micro-scale surface texture variation at the contact point.
-    // Each impact uses a fresh seed so modes are independently jittered.
-    // Reference: Rath & Rocchesso (2005) "Informative Sonic Feedback for
-    // Continuous Human-Machine Interaction."
+    // ── Per-impact random seed ───────────────────────────────────────────
+    // Models micro-scale texture variation. Golden ratio spread for low
+    // inter-mode correlation. Rath & Rocchesso (2005).
     float Seed = FMath::FRand();
 
     int32 N = ModalDataAsset->Modes.Num();
@@ -198,37 +251,72 @@ TArray<float> UModalImpactComponent::ComputeModeAmplitudes(
     {
         const FModalMode& Mode = ModalDataAsset->Modes[k];
 
-        // Participation factor φ_k(v): how strongly vertex v excites mode k.
-        // van den Doel & Pai (1998) §3.2.
+        // φ_k(v) — participation factor. Valid because VertexIndex came from
+        // FindClosestVertex which now searches FEMSurfaceVertexPositions.
         float Phi = Mode.VertexParticipation.IsValidIndex(VertexIndex)
                   ? Mode.VertexParticipation[VertexIndex]
                   : 0.f;
 
-        // Radiation efficiency η_k (baked into GlobalAmplitude in
-        // write_data_asset). Modes that radiate poorly are quiet.
-        float Eta = Mode.GlobalAmplitude;  // η_k, range [0.05, 1.0]
+        float Eta = Mode.GlobalAmplitude;  // radiation efficiency η_k
 
-        // Hertz contact spectral weight F_k:
-        //   F_k = |sinc(ω_k · T_c / 2π)|
-        // = |sin(π·f_k·T_c) / (π·f_k·T_c)|
-        // At f_k·T_c = 0: F_k = 1.0 (all energy)
-        // At f_k·T_c = 1: F_k = 0.0 (zero at first null)
-        // This implements the frequency-dependent spectral shaping from
-        // Chadwick et al. (2012) in a single line per mode.
-        float fT    = Mode.Frequency * T_c;  // dimensionless: f · T_c
-        float Sinc  = (fT < 1e-6f)
-                    ? 1.0f
-                    : FMath::Abs(FMath::Sin(PI * fT) / (PI * fT));
+        // Hertz sinc filter: F_k = |sin(π·f·T_c) / (π·f·T_c)|
+        float fT   = Mode.Frequency * T_c;
+        float Sinc = (fT < 1e-6f)
+                   ? 1.0f
+                   : FMath::Abs(FMath::Sin(PI * fT) / (PI * fT));
 
-        // Amplitude jitter ±15% using uncorrelated per-mode random values.
-        // Golden ratio phase increment ensures low correlation between modes.
-        // Previous code used sin(seed * 1000 * k) which had high correlation
-        // for adjacent modes. This version uses frac(seed * φ * k) where
-        // φ = 1.618 (golden ratio) to spread phases more uniformly.
+        // Jitter ±15%, golden-ratio phase to decorrelate adjacent modes.
         float Phase  = FMath::Fractional(Seed + k * 0.6180339f);
-        float Jitter = 0.85f + 0.30f * Phase;  // range [0.85, 1.15]
+        float Jitter = 0.85f + 0.30f * Phase;
 
         Amps[k] = Phi * EnergyScale * Eta * Sinc * VolumeScale * Jitter;
+    }
+
+    return Amps;
+}
+
+TArray<float> UModalImpactComponent::ComputeScrapeAmplitudes(
+    int32 VertexIndex,
+    float TangentialSpeed,
+    float NormalForce) const
+{
+    TArray<float> Amps;
+    if (!ModalDataAsset) return Amps;
+
+    // Scrape amplitude model (Rath & Rocchesso 2005 §3):
+    //   A_k = DragSensitivity_k × SpeedScale × NormalScale × jitter
+    //
+    // KEY CHANGE: NormalForce is no longer a hard multiplicative gate.
+    // Previously: Amps *= NormalForce — but NormalForce is estimated from
+    // |normal_velocity| × mass / MaxImpactEnergy, which is near zero for
+    // light objects sliding on flat surfaces. This caused near-silence.
+    // Fix: NormalForce modulates amplitude by ±30% (additive mix), not ×.
+    // The base amplitude is set by DragSensitivity × SpeedScale alone.
+    //
+    // Also: Phi (vertex participation) is NOT multiplied here for scraping.
+    // For impacts, Phi selects which modes are excited at the hit point.
+    // For scraping, the object resonates globally — all modes contribute
+    // regardless of where contact happens. Using Phi here would make scrape
+    // near-silent when contact is at a low-participation vertex.
+    float SpeedClamped  = FMath::Clamp(TangentialSpeed / 3.0f, 0.f, 1.f);
+    float NormalModAmt  = FMath::Clamp(NormalForce, 0.f, 1.f);  // 0–1
+    float NormalMod     = 0.70f + 0.30f * NormalModAmt;          // 0.70–1.00×
+    float Seed          = FMath::FRand();
+
+    int32 N = ModalDataAsset->Modes.Num();
+    Amps.SetNum(N);
+
+    for (int32 k = 0; k < N; ++k)
+    {
+        const FModalMode& Mode = ModalDataAsset->Modes[k];
+
+        float Drag = Mode.DragSensitivity;  // pre-shaped low-pass weight
+
+        // Micro-jitter: ±8%, different seed offset from impacts
+        float Phase  = FMath::Fractional(Seed + k * 0.6180339f + 0.5f);
+        float Jitter = 0.92f + 0.16f * Phase;
+
+        Amps[k] = Drag * SpeedClamped * NormalMod * VolumeScale * Jitter;
     }
 
     return Amps;
@@ -244,31 +332,11 @@ void UModalImpactComponent::OnHit(
     if (!ModalDataAsset) return;
     if (OtherActor && OtherActor->IsA(APawn::StaticClass())) return;
 
-    // Sleep check — resting contact micro-corrections
     if (HitComp)
     {
         FBodyInstance* Body = HitComp->GetBodyInstance();
         if (Body && !Body->IsInstanceAwake()) return;
     }
-
-    float Now = GetWorld()->GetTimeSeconds();
-    if (Now - LastImpactTime < ImpactCooldown) return;
-
-    // ── Relative velocity decomposition ──────────────────────────────────
-    // Split the relative velocity between the two bodies into:
-    //   NormalSpeed    — component along the contact normal (approach speed)
-    //   TangentialSpeed — component perpendicular to normal (sliding speed)
-    //
-    // A real impact has high NormalSpeed and low-to-zero TangentialSpeed.
-    // Sliding contact has near-zero NormalSpeed and high TangentialSpeed.
-    //
-    // We only trigger impact sound if NormalSpeed exceeds a threshold
-    // relative to TangentialSpeed. The ratio check ensures that even a
-    // fast-sliding object does not trigger impact sounds.
-    //
-    // Reference: this decomposition is standard in contact mechanics
-    // (Johnson 1985) and used in game audio practice to distinguish
-    // impact from scrape excitation (Rath & Rocchesso 2005).
 
     FVector OtherVel = FVector::ZeroVector;
     if (OtherComp && OtherComp->IsSimulatingPhysics())
@@ -277,22 +345,60 @@ void UModalImpactComponent::OnHit(
     FVector RelVel      = PreImpactVelocity - OtherVel;
     FVector ContactNorm = Hit.ImpactNormal;
 
-    // Project relative velocity onto contact normal
-    float NormalSpeed      = FMath::Abs(FVector::DotProduct(RelVel, ContactNorm));
-    // Remaining component is tangential (sliding)
-    float TangentialSpeed  = (RelVel - ContactNorm * NormalSpeed).Size();
+    float NormalSpeed     = FMath::Abs(FVector::DotProduct(RelVel, ContactNorm));
+    FVector TanVelVec     = RelVel - ContactNorm * NormalSpeed;
+    float TangentialSpeed = TanVelVec.Size();
+    float TotalSpeed      = RelVel.Size();
 
-    // Reject if this is predominantly sliding:
-    // NormalSpeed must be at least 30% of total relative speed,
-    // AND must exceed a minimum threshold to exclude micro-vibrations.
-    float TotalSpeed = RelVel.Size();
-    if (TotalSpeed < 0.05f) return;  // too slow to matter
+    if (TotalSpeed < 0.05f) return;  // too slow to matter at all
 
     float NormalFraction = NormalSpeed / FMath::Max(TotalSpeed, 0.001f);
-    if (NormalFraction < MinNormalFraction) return;
 
-    // KE from normal approach speed only — tangential motion does not
-    // contribute to the compressive impact that excites modal vibration
+    // Always record contact state for the slide ticker regardless of what we do next.
+    LastContactPoint  = Hit.ImpactPoint;
+    LastContactNormal = ContactNorm;
+
+    if (NormalFraction < MinNormalFraction)
+    {
+        // Predominantly sliding — record time/vertex for the slide ticker.
+        // Only update if we're NOT in a recent impact cooldown. This prevents
+        // a fast-moving plank hitting a wall from immediately re-entering slide
+        // state while the impact ring is still sounding — which would cause
+        // the scrape sound to snap back on within one PostImpactSuppressTime.
+        float Now2 = GetWorld()->GetTimeSeconds();
+        if (Now2 - LastImpactTime > ImpactCooldown)
+        {
+            LastSlideTime   = Now2;
+            LastSlideVertex = FindClosestVertex(Hit.ImpactPoint);
+        }
+        return;
+    }
+
+    // ── Impact path ───────────────────────────────────────────────────────
+    float Now = GetWorld()->GetTimeSeconds();
+    if (Now - LastImpactTime < ImpactCooldown) return;
+
+    // Suppress the slide ticker for a brief window around the impact moment.
+    // Set LastSlideTime to (Now - 0.10f + PostImpactSuppressWindow) so that the
+    // tick's bSlidingRecently check (< 0.10s) remains false for exactly
+    // PostImpactSuppressWindow seconds, then allows slide to resume.
+    //
+    // IMPORTANT: we do NOT block slide for the full ImpactCooldown (200ms).
+    // At high velocity the object is still moving fast after the impact.
+    // If we suppress slide for 200ms, there is an audible dead gap — no impact
+    // (cooldown blocks re-trigger), no scrape (slide blocked) — for the full
+    // cooldown window. At 10 m/s this sounds like a sharp cutoff in the middle
+    // of a loud collision.
+    //
+    // The bridge already applies PostImpactSuppressTime as a gain ramp
+    // (SmoothedScrapeGain fades from 0 on the bridge side). So we only need
+    // to block the slide ticker long enough for the bridge to start smoothing.
+    // 60ms is enough: the bridge ramps in over ScrapeGainSmoothing (default ~120ms),
+    // so the scrape is already at near-zero when slide resumes here.
+    // The result is a smooth crossfade: impact ring → scrape fade-in, with no gap.
+    static constexpr float SlideSuppressWindow = 0.06f;   // s — matches bridge ramp
+    LastSlideTime = Now - (0.10f - SlideSuppressWindow);
+
     float Mass = 1.f;
     if (HitComp && HitComp->IsSimulatingPhysics())
     {
@@ -304,10 +410,8 @@ void UModalImpactComponent::OnHit(
     if (KE < MinImpactEnergy) return;
 
     LastImpactTime = Now;
-    int32 Vertex = FindClosestVertex(Hit.ImpactPoint);
+    int32 Vertex   = FindClosestVertex(Hit.ImpactPoint);
 
-    // Pass NormalSpeed as RelativeSpeed for Hertz contact shaping —
-    // only the normal component drives the contact force pulse duration
     OnModalImpact.Broadcast(
         Hit.ImpactPoint, KE, NormalSpeed, Vertex, ModalDataAsset, Hit.ImpactNormal);
 }

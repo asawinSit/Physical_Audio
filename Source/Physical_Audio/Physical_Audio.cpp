@@ -3,8 +3,12 @@
 #include "Modules/ModuleManager.h"
 #include "MetasoundFrontendModuleRegistrationMacros.h"
 
-// Force linker to include ModalSynthNode translation unit
+// Force linker to include each MetaSound node translation unit.
+// This is the correct registration pattern for UE 5.7 — each node .cpp
+// must be #included here so the TNodeFacade + METASOUND_REGISTER_NODE
+// static initialisers are pulled into the final binary.
 #include "MetaSoundNodes/ModalSynthNode.cpp"
+#include "MetaSoundNodes/MetasoundModalResonatorNode.cpp"
 
 class FPhysicalAudioModule : public FDefaultGameModuleImpl
 {

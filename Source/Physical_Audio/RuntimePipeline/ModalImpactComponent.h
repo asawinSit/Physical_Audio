@@ -5,40 +5,38 @@
 //
 // PURPOSE
 // -------
-// Detects physics collisions on the owner actor, computes kinetic energy
-// and per-mode excitation amplitudes, and broadcasts a delegate for the
-// ModalMetaSoundBridge to drive MetaSound synthesis.
+// Detects physics collisions on the owner actor, decomposes velocity into
+// normal (impact) and tangential (sliding) components, computes per-mode
+// amplitudes for each, and broadcasts separate delegates for the bridge.
 //
-// SCIENTIFIC BASIS
-// ----------------
-// VELOCITY-BASED KE (new in this version):
-//   KE = ½mv²  using the physics velocity cached each tick BEFORE the
-//   collision resolves. This is more numerically stable than using the
-//   NormalImpulse vector from OnComponentHit, which can vary ±30% for
-//   identical drops due to physics solver sub-step timing.
+// WHAT CHANGED FROM PREVIOUS VERSION
+// ------------------------------------
+// 1. VERTEX INDEX FIX (critical):
+//    FindClosestVertex now searches FEMSurfaceVertexPositions stored in the
+//    DataAsset rather than the render mesh LOD0 vertices. The render mesh and
+//    the FEM mesh have different vertex counts due to subdivision — searching
+//    the wrong mesh returned indices that indexed into the wrong part of
+//    VertexParticipation, silently breaking all spatial impact variation.
 //
-// HERTZ CONTACT FORCE SHAPING (Chadwick, Zheng & James 2012):
-//   The contact force pulse between two elastic bodies has a characteristic
-//   duration T_c ∝ (m_eff / k_Hertz)^0.4 (Johnson 1985, Contact Mechanics).
-//   The Fourier transform of a half-sine pulse of duration T_c:
-//     F(ω) = sinc(ω·T_c / 2π)
-//   acts as a low-pass filter on modal excitation — hard/fast impacts
-//   (short T_c) excite all frequencies; soft/slow impacts (long T_c)
-//   excite only low modes. This produces the perceptual difference between
-//   a gentle tap and a hard slam even at the same total energy.
-//   "The addition of acceleration noise significantly complements the
-//   standard modal sound algorithm, especially for small objects."
-//   — Chadwick et al. (2012), Abstract.
+// 2. CONTACT HARDNESS FROM DATAASSET:
+//    ContactHardness is now read from DataAsset->ContactHardness at BeginPlay
+//    rather than using a fixed default. A Wood DataAsset now automatically uses
+//    wood-appropriate Hertz contact shaping without manual override.
+//    The override property is kept for Blueprint tuning.
 //
-// AMPLITUDE FORMULA (per mode k):
-//   A_k = φ_k(v) × √(KE/KE_max) × η_k × F_k(v_impact) × jitter
-//   where:
-//     φ_k(v)       = participation factor from DataAsset (van den Doel 1998)
-//     √(KE/KE_max) = energy scale (Klatzky et al. 2000: loudness ∝ √force)
-//     η_k          = radiation efficiency (stored in GlobalAmplitude)
-//     F_k(v)       = Hertz sinc weight at mode frequency and impact speed
-//     jitter       = ±15% random variation (Rath & Rocchesso 2005)
+// 3. SLIDING SOUND DELEGATE (new):
+//    FOnModalSlide is broadcast continuously from TickComponent when the body
+//    is in contact and sliding. This uses TangentialSpeed and NormalForce to
+//    drive a separate scrape MetaSound. The bridge maintains a persistent
+//    audio component for the scrape sound (no per-frame spawning).
 //
+// AMPLITUDE FORMULA (impact, per mode k):
+//   A_k = φ_k(v) × √(KE/KE_max) × η_k × sinc(f_k·T_c) × jitter
+//   where T_c = C_mat / v^0.2   (Hertz contact theory, Johnson 1985)
+//
+// SCRAPE AMPLITUDE FORMULA (per mode k):
+//   A_k = DragSensitivity_k × TangentialSpeed × NormalForce_normalised × jitter
+//   Reference: Rath & Rocchesso (2005) §3.
 // ============================================================================
 
 #include "CoreMinimal.h"
@@ -46,24 +44,32 @@
 #include "OfflinePipeline/ModalSoundDataAsset.h"
 #include "ModalImpactComponent.generated.h"
 
-/**
- * Delegate broadcast on every qualifying impact event.
- *
- * ImpactPoint       — world-space contact location
- * KineticEnergy     — ½mv² in joules (from pre-impact velocity)
- * RelativeSpeed     — pre-impact speed in m/s (for Hertz contact weight)
- * ClosestVertex     — index into DataAsset surface vertex array
- * DataAsset         — ModalSoundDataAsset for this object
- * ImpactNormal      — world-space surface normal at contact
- */
+// ── Impact delegate ───────────────────────────────────────────────────────
+// Broadcast once per qualifying impact event.
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(
     FOnModalImpact,
     FVector,               ImpactPoint,
     float,                 KineticEnergy,
-    float,                 RelativeSpeed,
-    int32,                 ClosestVertex,
+    float,                 RelativeSpeed,      // normal component only
+    int32,                 ClosestVertex,       // index into FEM surface mesh
     UModalSoundDataAsset*, DataAsset,
     FVector,               ImpactNormal
+);
+
+// ── Slide delegate ────────────────────────────────────────────────────────
+// Broadcast each tick while the body is actively sliding.
+// TangentialSpeed — m/s component perpendicular to contact normal
+// NormalForce     — normalised [0,1] clamped from normal KE proxy
+//                   (used to shape scrape amplitude: louder when pressed harder)
+// ContactPoint    — world-space average contact position
+// DataAsset       — same DataAsset as the impact delegate
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
+    FOnModalSlide,
+    float,                 TangentialSpeed,
+    float,                 NormalForce,
+    FVector,               ContactPoint,
+    UModalSoundDataAsset*, DataAsset,
+    int32,                 ClosestVertex
 );
 
 UCLASS(ClassGroup=(Audio), meta=(BlueprintSpawnableComponent),
@@ -82,23 +88,26 @@ public:
     UModalSoundDataAsset* ModalDataAsset;
 
     /**
-     * Minimum kinetic energy (J) to trigger a sound event.
-     * Filters out resting contact, micro-vibrations, and sliding friction.
+     * Minimum kinetic energy (J) to trigger an impact sound.
+     * Filters out resting contact and micro-vibrations.
      *
-     * TUNING GUIDE:
-     *   Start at 1% of a typical drop impact's KE.
-     *   KE = 0.5 × mass_kg × (drop_velocity_m_s)²
-     *   Example: 5 kg object dropped 1 m → v = √(2·9.8·1) ≈ 4.4 m/s
-     *            KE = 0.5 × 5 × 19.6 = 49 J → set MinImpactEnergy ≈ 5 J
+     * Formula: KE = 0.5 × mass(kg) × NormalSpeed(m/s)²
+     * Examples for a 5 kg plank:
+     *   0.3 m/s drop → KE = 0.225 J  (tip barely touching floor — silent)
+     *   1.0 m/s drop → KE = 2.5 J    (gentle fall)
+     *   3.0 m/s drop → KE = 22.5 J   (moderate fall)
+     *
+     * Default 1.0 J. Previous default was 5.0 J, which was silencing gentle
+     * drops of heavy planks (low speed + high mass still gives a real impact).
+     * For small light objects (< 1 kg) raise to 2.0–5.0 to filter resting noise.
+     * For heavy planks (> 10 kg) can lower to 0.5.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
               meta=(ClampMin="0.0"))
-    float MinImpactEnergy = 5.0f;
+    float MinImpactEnergy = 1.0f;
 
     /**
-     * Maximum kinetic energy (J) for amplitude normalisation.
-     * Impacts at or above this KE play at full amplitude.
-     * Set to the KE of the hardest expected impact.
+     * KE (J) that maps to full amplitude. Impacts above this are clamped.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
               meta=(ClampMin="1.0"))
@@ -106,46 +115,117 @@ public:
 
     /**
      * Minimum seconds between consecutive impact events.
-     * Prevents retriggering during tumble/roll sequences.
-     * 0.1–0.2 s is typical.
+     * Prevents rapid re-triggering during tumble/roll.
+     *
+     * Default 0.20s. For long planks that bounce, both ends can hit
+     * within < 0.15s — use 0.20–0.25s to ensure only the primary impact
+     * sounds (the second bounce at lower speed would produce a thud).
+     * For small objects that tumble rapidly (coins, dice) lower to 0.08–0.10s.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
               meta=(ClampMin="0.0"))
-    float ImpactCooldown = 0.15f;
+    float ImpactCooldown = 0.20f;
 
     /**
      * Global volume multiplier applied to all mode amplitudes.
-     * Use to adjust loudness without changing the DataAsset.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
               meta=(ClampMin="0.0", ClampMax="4.0"))
     float VolumeScale = 1.0f;
 
     /**
-     * Material Hertz contact hardness override.
-     * Matches the 'contact_hardness' value for the assigned material.
-     * Controls estimated contact duration:
-     *   T_c ∝ 1/sqrt(hardness) — harder = shorter = more high-freq content.
-     * Exposed here so it can be set per-Blueprint without regenerating the
-     * DataAsset. Default 0.8 matches HeavyMetal preset.
-     * Reference: Chadwick et al. (2012) §3; Johnson (1985) Contact Mechanics.
+     * Hertz contact hardness override.
+     * Normally read automatically from DataAsset->ContactHardness at BeginPlay.
+     * Exposed here so you can fine-tune per-Blueprint without regenerating assets.
+     * Default 0.8 (HeavyMetal) — will be overwritten by DataAsset value at BeginPlay.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
               meta=(ClampMin="0.01", ClampMax="2.0"))
     float ContactHardness = 0.8f;
 
-    // ── OUTPUT ─────────────────────────────────────────────────────────────
+    /**
+     * Scales the Hertz contact duration T_c used in the sinc excitation filter.
+     *
+     *   T_c = (0.0025 / sqrt(ContactHardness)) × ContactDurationScale / v^0.2
+     *
+     * Primarily affects AMPLITUDE: smaller values let more modes through the
+     * sinc filter → louder impact. Does NOT significantly change tonal character
+     * because at values ≤ 0.5, sinc ≈ 1.0 for all modes and they all scale
+     * proportionally — the spectral shape (mode ratios) is unchanged.
+     *
+     * Keep at 1.0 for physically correct behaviour. Only lower if impacts
+     * are consistently too quiet after tuning MasterGain and ContactHardness.
+     * Range 0.3–1.0 for fine-tuning. Does NOT fix the "soft/dull" character
+     * problem — use ContactGain (via ContactHardness) for that.
+     *
+     * Default 1.0.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
+              meta=(ClampMin="0.05", ClampMax="2.0"))
+    float ContactDurationScale = 1.0f;
+
+    /**
+     * normal to count as an impact (not sliding).
+     * 0.30 = at least 30% normal component.
+     * Raise if sliding still triggers impacts. Lower if glancing hits are missed.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
+              meta=(ClampMin="0.0", ClampMax="1.0"))
+    float MinNormalFraction = 0.30f;
+
+    /**
+     * Minimum tangential speed (m/s) to start broadcasting slide events.
+     * Filters resting or barely-moving contact.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
+              meta=(ClampMin="0.0"))
+    float MinSlideSpeed = 0.05f;
+
+    /**
+     * How quickly the slide sound fades in/out as TangentialSpeed changes.
+     * One-pole smoothing filter applied each tick:
+     *   SmoothedSpeed = lerp(SmoothedSpeed, TangentialSpeed, SlideSmoothing)
+     * Range 0.0–1.0. Lower = smoother, slower response.
+     *
+     * Default 0.50 (~67ms to 90% at 60fps).
+     *
+     * Why 0.50 and not lower:
+     *   At 0.15 (250ms rise time), fast changes in tangential speed during
+     *   impact/bounce cycles produce a lagging, anaemic scrape that doesn't
+     *   react to the physics. Objects that slide briefly between bounces sound
+     *   like they barely touch the surface. 0.50 gives crisp, responsive
+     *   scrape onset that matches visible motion.
+     *
+     * The bridge's ScrapeGainSmoothing (default 0.20) adds a second layer of
+     * smoothing on top, so there is no risk of pops at this setting.
+     *
+     * Reduce to 0.20–0.30 only for very heavy, slow-moving objects (stone
+     * blocks, heavy machinery) where speed changes are naturally gradual.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
+              meta=(ClampMin="0.01", ClampMax="1.0"))
+    float SlideSmoothing = 0.50f;
+
+    // ── OUTPUT DELEGATES ───────────────────────────────────────────────────
 
     UPROPERTY(BlueprintAssignable, Category="Modal Sound")
     FOnModalImpact OnModalImpact;
 
+    UPROPERTY(BlueprintAssignable, Category="Modal Sound")
+    FOnModalSlide OnModalSlide;
+
     // ── PUBLIC API ─────────────────────────────────────────────────────────
 
     /**
-     * Finds the surface vertex in the DataAsset closest to WorldPosition.
-     * Uses the render mesh vertex cache built at BeginPlay.
-     * Impact sounds vary spatially because different vertices have
-     * different participation factors for each mode.
+     * Finds the FEM surface vertex closest to WorldPosition.
+     *
+     * CHANGE FROM PREVIOUS VERSION:
+     *   Now searches DataAsset->FEMSurfaceVertexPositions instead of the
+     *   render mesh LOD0. The two meshes differ due to subdivision (e.g. a cube
+     *   has 8 render verts but 386 FEM verts). Using the render mesh index to
+     *   look up VertexParticipation was reading from the wrong entries.
+     *
+     * Returns an index valid for Mode.VertexParticipation[index].
      */
     UFUNCTION(BlueprintCallable, Category="Modal Sound")
     int32 FindClosestVertex(FVector WorldPosition) const;
@@ -153,19 +233,10 @@ public:
     /**
      * Computes per-mode excitation amplitudes for one impact event.
      *
-     * Full formula (van den Doel & Pai 1998 + Chadwick et al. 2012):
-     *   A_k = φ_k(vertex) × √(KE/KE_max) × η_k × F_k(speed) × jitter
+     *   A_k = φ_k(v) × √(KE/KE_max) × η_k × sinc(f_k·T_c) × jitter
      *
-     * where F_k(speed) = sinc(ω_k · T_c(speed) / 2π)
-     * and   T_c(speed) = T_c_base × (v_ref / speed)^0.2
-     *                  = contact duration (Hertz theory, Johnson 1985)
-     *
-     * Args:
-     *   VertexIndex   — closest surface vertex (from FindClosestVertex)
-     *   KineticEnergy — ½mv² in joules
-     *   RelativeSpeed — pre-impact speed in m/s
-     *   ImpactNormal  — surface normal at impact point (reserved for future
-     *                   use in direction-dependent excitation)
+     * T_c = C_mat / v^0.2  (Hertz theory, Johnson 1985)
+     * C_mat = 0.0025 / √(ContactHardness)   (from DataAsset, not hardcoded)
      */
     UFUNCTION(BlueprintCallable, Category="Modal Sound")
     TArray<float> ComputeModeAmplitudes(int32   VertexIndex,
@@ -173,16 +244,20 @@ public:
                                          float   RelativeSpeed,
                                          FVector ImpactNormal) const;
 
-	/**
-	 * Minimum fraction of relative velocity that must be along the contact
-	 * normal to count as an impact rather than sliding.
-	 * Range 0.0–1.0. Default 0.30 means at least 30% normal component.
-	 * Raise if sliding still triggers sounds. Lower if glancing impacts
-	 * are being missed.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
-			  meta=(ClampMin="0.0", ClampMax="1.0"))
-	float MinNormalFraction = 0.30f;
+    /**
+     * Computes per-mode scrape amplitudes for one tick of sliding contact.
+     *
+     *   A_k = DragSensitivity_k × SmoothedTangentialSpeed × NormalForce × jitter
+     *
+     * DragSensitivity_k is pre-computed in the pipeline as:
+     *   η_k / (1 + (f_k / f_0)²)
+     * so low modes dominate (low-frequency emphasis in scraping).
+     * Reference: Rath & Rocchesso (2005) §3.
+     */
+    UFUNCTION(BlueprintCallable, Category="Modal Sound")
+    TArray<float> ComputeScrapeAmplitudes(int32 VertexIndex,
+                                           float TangentialSpeed,
+                                           float NormalForce) const;
 
 protected:
     virtual void BeginPlay() override;
@@ -195,19 +270,23 @@ private:
                UPrimitiveComponent* OtherComp, FVector NormalImpulse,
                const FHitResult& Hit);
 
-    void BuildVertexCache();
+    // FEM vertex cache is no longer built from the render mesh.
+    // FindClosestVertex reads DataAsset->FEMSurfaceVertexPositions directly.
+    // BuildVertexCache() is removed — no cache needed since the DataAsset
+    // already stores positions in a contiguous array.
 
     UPROPERTY() UPrimitiveComponent* OwnerMesh = nullptr;
 
-    /** Render-mesh vertex positions in local space (centimetres). */
-    TArray<FVector> CachedVerts;
+    // Physics velocity (m/s) cached one tick before collision.
+    FVector PreImpactVelocity = FVector::ZeroVector;
 
-    /**
-     * Physics velocity cached each tick BEFORE collision.
-     * Already converted to m/s in TickComponent.
-     * Used to compute KE = ½mv² without relying on the noisy impulse vector.
-     */
-	FVector PreImpactVelocity = FVector::ZeroVector;
+    // Sliding state — tracked across ticks for the slide delegate.
+    bool  bIsSliding          = false;
+    float SmoothedSlideSpeed  = 0.f;
+    FVector LastContactPoint  = FVector::ZeroVector;
+    FVector LastContactNormal = FVector::UpVector;
+    float LastSlideTime       = -999.f;     // time of last OnHit during a slide
+    int32 LastSlideVertex     = 0;
 
     float LastImpactTime = -999.f;
 };
