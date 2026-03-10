@@ -57,8 +57,8 @@ void APhysical_AudioCharacter::SetupPlayerInputComponent(UInputComponent* Player
 		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this, &APhysical_AudioCharacter::MoveInput);
 
 		// Looking/Aiming
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &APhysical_AudioCharacter::LookInput);
-		EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &APhysical_AudioCharacter::LookInput);
+		//EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &APhysical_AudioCharacter::LookInput);
+		//EnhancedInputComponent->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &APhysical_AudioCharacter::LookInput);
 	}
 	else
 	{
