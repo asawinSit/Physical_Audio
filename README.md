@@ -10,7 +10,6 @@ This project implements a physically based modal sound synthesis pipeline within
 
 - **Unreal Engine 5.7**
 - **Python Editor Script Plugin** — enable in Unreal Engine plugins menu
-- **MetaSounds** — enabled by default in UE 5.7
 
 ---
 
