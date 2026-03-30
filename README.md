@@ -17,33 +17,27 @@ This project implements a physically based modal sound synthesis pipeline within
 
 The offline pipeline runs inside Unreal Engine's bundled Python interpreter. You must install the packages into **Unreal Engine's Python**, not your system Python.
 
-### Install
-
-Open Command Prompt and run:
-
-```bat
-set UE_PYTHON="C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\ThirdParty\Python3\Win64\python.exe"
-
-%UE_PYTHON% -m pip install --upgrade pip
-%UE_PYTHON% -m pip install numpy
-%UE_PYTHON% -m pip install scipy
-%UE_PYTHON% -m pip install tetgen --prefer-binary
-%UE_PYTHON% -m pip install meshio
-%UE_PYTHON% -m pip install pymeshfix
-```
-
-Or in PowerShell:
-
+### Install on Windows (PowerShell)
+ 
 ```powershell
-$UE_PYTHON = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\ThirdParty\Python3\Win64\python.exe"
-
-& $UE_PYTHON -m pip install --upgrade pip
-& $UE_PYTHON -m pip install numpy
-& $UE_PYTHON -m pip install scipy
-& $UE_PYTHON -m pip install tetgen --prefer-binary
-& $UE_PYTHON -m pip install meshio
-& $UE_PYTHON -m pip install pymeshfix
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -m pip install numpy
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -m pip install scipy
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -m pip install tetgen --prefer-binary
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -m pip install meshio
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -m pip install pymeshfix
 ```
+ 
+### Install on Mac (Terminal)
+ 
+```bash
+/Users/Shared/Epic\ Games/UE_5.7/Engine/Binaries/ThirdParty/Python3/Mac/bin/python3 -m pip install numpy
+/Users/Shared/Epic\ Games/UE_5.7/Engine/Binaries/ThirdParty/Python3/Mac/bin/python3 -m pip install scipy
+/Users/Shared/Epic\ Games/UE_5.7/Engine/Binaries/ThirdParty/Python3/Mac/bin/python3 -m pip install tetgen --prefer-binary
+/Users/Shared/Epic\ Games/UE_5.7/Engine/Binaries/ThirdParty/Python3/Mac/bin/python3 -m pip install meshio
+/Users/Shared/Epic\ Games/UE_5.7/Engine/Binaries/ThirdParty/Python3/Mac/bin/python3 -m pip install pymeshfix
+```
+ 
+> **Note for Mac users:** The path above assumes a standard Unreal Engine installation. If you installed UE elsewhere, adjust the path accordingly. You can find the correct path by right-clicking Unreal Engine in the Epic Games Launcher, selecting **Show in Finder**, then navigating to `Engine/Binaries/ThirdParty/Python3/Mac/bin/python3`.
 
 ### Packages
 
