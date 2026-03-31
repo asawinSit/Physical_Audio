@@ -70,7 +70,7 @@ private:
                       float                 NormalForce,
                       FVector               ContactPoint);
 
-    //void InitScrapeAudio(UModalSoundDataAsset* DataAsset);
+    void InitScrapeAudio();
 
     UPROPERTY()
     class UModalImpactComponent* ImpactComp = nullptr;
