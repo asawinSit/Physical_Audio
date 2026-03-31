@@ -1044,9 +1044,11 @@ def generate_modal_asset(mesh_asset_path:    str,
                           output_asset_path:  str,
                           material:           str = "HeavyMetal",
                           num_modes:          int = 10,  # 10 modes are perceptually sufficient (Klatzky 2000)
-                          shell_thickness_m:  float | None = None):
+                          shell_thickness_m:  float | None = None,
+                          solver:             str | None = None):
     """
-    Full pipeline. Automatically detects whether to use solid-tet or shell FEM.
+    Full pipeline. Automatically detects whether to use solid-tet or shell FEM,
+    or uses an explicit solver if provided.
 
     MATERIAL GUIDE:
       Metal      — small steel objects < 30 cm
@@ -1057,35 +1059,46 @@ def generate_modal_asset(mesh_asset_path:    str,
       Plastic    — plastic containers, toys
       Ceramic    — mugs, tiles, fired clay, porcelain plates
 
-    SOLVER GUIDE (automatic — you do NOT need to set this):
-      Shell FEM  → plates, planks, cups, mugs, bowls, tubes, pots, pans, bells
-      Solid FEM  → cubes, chairs, stools, books, bricks, thick furniture
+    SOLVER GUIDE:
+      None (default) — auto-detect via classify_geometry(). Works well for most
+                        objects but can misclassify open-top hollow objects (bottles,
+                        vases, open bowls) as solid because ray-casting through the
+                        open top produces few hits and falls back to solid.
+      "Shell"        — force Kirchhoff shell FEM. Use for:
+                        plates, planks, sheets, cups, mugs, bowls, vases,
+                        bottles, tubes/pipes, pots, pans, bells, cymbals.
+                        Also correct for any thin-walled object the auto-classifier
+                        got wrong.
+      "Solid"        — force solid-tet FEM. Use for:
+                        cubes, bricks, thick furniture, books, cannonballs,
+                        stone blocks, solid chairs.
 
     SHELL THICKNESS OVERRIDE:
       shell_thickness_m: if you know the exact wall thickness (metres), pass it here.
+      Only used when solver="shell" or when auto-detect routes to shell.
       Example: a 3mm steel plate → shell_thickness_m=0.003
       If None (default), thickness is estimated automatically from the mesh.
 
     EXAMPLES:
-      # Wooden plank (auto-detected as shell)
-      generate_modal_asset("/Game/Meshes/SM_Plank",
-                           "/Game/ModalData/MDA_Plank_Wood",
-                           material="Wood")
+      # Glass bottle — auto-classifier often fails on open meshes, force shell:
+      generate_modal_asset("/Game/Meshes/SM_GlassBottle",
+                           "/Game/ModalData/MDA_GlassBottle",
+                           material="Glass", solver="shell", shell_thickness_m=0.004)
 
-      # Glass plate (auto-detected as shell, override thickness)
-      generate_modal_asset("/Game/Meshes/SM_GlassPlate",
-                           "/Game/ModalData/MDA_GlassPlate",
-                           material="Glass", shell_thickness_m=0.006)
+      # Wooden pallet — usually auto-detected as shell, but force it to be safe:
+      generate_modal_asset("/Game/Meshes/SM_Pallet",
+                           "/Game/ModalData/MDA_Pallet_Wood",
+                           material="Wood", solver="shell")
 
-      # Ceramic mug (auto-detected as hollow shell)
+      # Ceramic mug — let auto-detect decide (hollow object, usually works):
       generate_modal_asset("/Game/Meshes/SM_Mug",
                            "/Game/ModalData/MDA_Mug_Ceramic",
                            material="Ceramic")
 
-      # Heavy metal machine part (solid)
+      # Heavy metal machine part — force solid to avoid stray shell detection:
       generate_modal_asset("/Game/Meshes/SM_MachinePart",
                            "/Game/ModalData/MDA_MachinePart",
-                           material="HeavyMetal")
+                           material="HeavyMetal", solver="solid")
     """
     unreal.log("=" * 60)
     unreal.log(f"  MODAL GENERATOR  {mesh_asset_path}")
@@ -1111,14 +1124,46 @@ def generate_modal_asset(mesh_asset_path:    str,
     if not validate_mesh_for_fem(vertices, faces):
         raise RuntimeError("Mesh still invalid after repair.")
 
-    # Stage 2 — auto-classify geometry
-    geo = classify_geometry(vertices, faces, meta)
-    solver    = geo["solver"]
-    auto_thickness = geo["thickness"]
-    thickness = shell_thickness_m if shell_thickness_m is not None else auto_thickness
-
-    unreal.log(f"[Pipeline] Solver: {solver.upper()}  "
-               f"thickness: {thickness*100:.2f} cm")
+    # Stage 2 — choose solver
+    # If the caller provided an explicit solver, skip classification entirely.
+    # This is the safest path for objects the auto-classifier gets wrong:
+    #   - Open-top hollow objects (bottles, vases): rays escape through the opening,
+    #     too few hits → fallback returns 10mm → borderline HOLLOW_MAX_WALL_M check →
+    #     often misclassified as solid.
+    #   - Very large flat objects: aspect ratio check can fail if the mesh has
+    #     padding geometry (e.g. pallet boards adding depth).
+    if solver is not None:
+        solver = solver.lower().strip()
+        if solver not in ("shell", "solid"):
+            raise ValueError(
+                f"solver must be 'shell', 'solid', or None (auto). Got: '{solver}'")
+        if solver == "shell":
+            # Still need a thickness estimate even when solver is forced.
+            # Use the provided override, or estimate automatically.
+            if shell_thickness_m is not None:
+                thickness = shell_thickness_m
+            else:
+                from modal_mesh_utils import estimate_shell_thickness
+                estimated = estimate_shell_thickness(vertices, faces, n_rays=64)
+                if estimated is None:
+                    # Fallback: use thinnest bbox dimension
+                    sorted_ext = np.sort(meta["bbox_extent"])
+                    estimated  = float(sorted_ext[0])
+                thickness = estimated
+            unreal.log(f"[Pipeline] Solver: SHELL (forced by caller)  "
+                       f"thickness: {thickness*100:.2f} cm")
+        else:
+            # solver == "solid" — thickness is irrelevant for solid path
+            thickness = float(np.sort(meta["bbox_extent"])[2])
+            unreal.log(f"[Pipeline] Solver: SOLID (forced by caller)")
+    else:
+        # Auto-classify
+        geo = classify_geometry(vertices, faces, meta)
+        solver         = geo["solver"]
+        auto_thickness = geo["thickness"]
+        thickness      = shell_thickness_m if shell_thickness_m is not None else auto_thickness
+        unreal.log(f"[Pipeline] Solver: {solver.upper()} (auto-detected)  "
+                   f"thickness: {thickness*100:.2f} cm")
 
     mat = MATERIAL_PRESETS[material]
 
@@ -1215,8 +1260,11 @@ def generate_modal_asset(mesh_asset_path:    str,
 
 
 def generate_from_widget(mesh_path, output_path, material, num_modes_str,
-                          shell_thickness_str=""):
-    """Widget entry point — handles Blueprint string conversion."""
+                          shell_thickness_str="", solver_str=""):
+    """Widget entry point — handles Blueprint string conversion.
+
+    solver_str: "shell", "solid", or "" / "auto" for auto-detect.
+    """
     import importlib, modal_mesh_utils
     importlib.reload(modal_mesh_utils)
     mesh_path   = mesh_path.split(".")[0]
@@ -1230,4 +1278,9 @@ def generate_from_widget(mesh_path, output_path, material, num_modes_str,
             thickness = float(shell_thickness_str)
         except ValueError:
             pass
-    generate_modal_asset(mesh_path, output_path, material, num_modes, thickness)
+    # Resolve solver string: blank or "auto" → None (auto-detect)
+    solver = solver_str.strip().lower() if solver_str.strip() else None
+    if solver in ("", "auto"):
+        solver = None
+    generate_modal_asset(mesh_path, output_path, material, num_modes,
+                         thickness, solver)
