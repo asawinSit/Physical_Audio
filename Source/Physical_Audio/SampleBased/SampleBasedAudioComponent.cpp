@@ -9,29 +9,15 @@
 
 USampleBasedAudioComponent::USampleBasedAudioComponent()
 {
-    // Tick needed to advance TimeSinceLastImpact for post-impact scrape suppression.
     PrimaryComponentTick.bCanEverTick = true;
 }
 
 void USampleBasedAudioComponent::BeginPlay()
 {
     Super::BeginPlay();
-
     ImpactComp = GetOwner()->FindComponentByClass<UModalImpactComponent>();
-    if (!ImpactComp)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("[ModalBridge] '%s': No ModalImpactComponent found."),
-            *GetOwner()->GetName());
-        return;
-    }
-
-   // ImpactComp->OnModalImpact.AddDynamic(this, &USampleBasedAudioComponent::HandleImpact);
-    //ImpactComp->OnModalSlide.AddDynamic(this,  &USampleBasedAudioComponent::HandleSlide);
-
-    UE_LOG(LogTemp, Log,
-        TEXT("[ModalBridge] '%s' ready (v2 — continuous resonator bank)"),
-        *GetOwner()->GetName());
+    ImpactComp->OnSampleBasedImpact.AddDynamic(this, &USampleBasedAudioComponent::HandleImpact);
+    ImpactComp->OnSampleBasedSlide.AddDynamic(this,  &USampleBasedAudioComponent::HandleSlide);
 }
 
 void USampleBasedAudioComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -46,27 +32,56 @@ void USampleBasedAudioComponent::TickComponent(float DeltaTime, ELevelTick TickT
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
     TimeSinceLastImpact += DeltaTime;
+    
+    
+    if (bScrapeInitialised && ScrapeAudio && SmoothedScrapeGain > 0.001f)
+    {
+        if (!bSlideActiveThisFrame)
+        {
+            SmoothedScrapeGain = FMath::Lerp(SmoothedScrapeGain, 0.f, ScrapeGainSmoothing);
+            ScrapeAudio->SetFloatParameter(FName("ScrapeGain"), SmoothedScrapeGain);
+        }
+        bSlideActiveThisFrame = false;
+    }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// IMPACT
-// ─────────────────────────────────────────────────────────────────────────────
+
 void USampleBasedAudioComponent::HandleImpact(
-    FVector               ImpactPoint,
-    float                 KineticEnergy,
-    float                 RelativeSpeed,
-    FVector               ImpactNormal)
+    FVector   ImpactPoint,
+    float     KineticEnergy,
+    float     RelativeSpeed,
+    FVector   ImpactNormal)
 {
+    if (!bListenerEnabled) return;
+    // --- Gain from relative speed (unchanged) ---
     float ContactGain = FMath::Clamp(
         FMath::Sqrt(RelativeSpeed / 4.0f),
         0.15f, 0.95f);
 
+    // --- Derive extra modifiers from the new inputs ---
+
+    // Normalise kinetic energy into a 0-1 range; tune MaxKE to your sim's scale
+    const float MaxKE        = 5000.f;
+    float       EnergyAlpha  = FMath::Clamp(KineticEnergy / MaxKE, 0.f, 1.f);
+
+    // How "glancing" the hit is: 1 = head-on, 0 = fully glancing
+    float       DirectFactor = FMath::Abs(FVector::DotProduct(ImpactNormal.GetSafeNormal(),
+                                                               FVector::UpVector));
+
+    // Blend ContactGain with energy so a harder hit is louder
+    float FinalVolume = FMath::Clamp(ContactGain * (0.5f + 0.5f * EnergyAlpha), 0.15f, 1.f);
+
+    // Optionally pitch up on glancing hits (DirectFactor near 0 → higher pitch)
+    float PitchScale  = FMath::Lerp(1.3f, 1.0f, DirectFactor);
+
     UAudioComponent* Audio = UGameplayStatics::SpawnSoundAtLocation(
         GetWorld(),
         SoundAsset,
-       ImpactPoint,
+        ImpactPoint,
         FRotator::ZeroRotator,
-        1.f, 1.f, 0.f,
+        FinalVolume,   // VolumeMultiplier  ← was hardcoded 1.f
+        PitchScale,    // PitchMultiplier   ← was hardcoded 1.f
+        0.f,
         nullptr,
         nullptr,
         true);
@@ -77,10 +92,13 @@ void USampleBasedAudioComponent::HandleImpact(
             TEXT("[USampleBasedAudioComponent] SpawnSoundAtLocation returned null."));
         return;
     }
-  
+
+    // Pass energy and angle to Metasound/FMOD parameters if needed
+    Audio->SetFloatParameter(FName("KineticEnergy"), KineticEnergy);
+    Audio->SetFloatParameter(FName("DirectFactor"),  DirectFactor);
+
     Audio->SetTriggerParameter(FName("Trigger"));  // MUST be last
 
-    
     TimeSinceLastImpact = 0.f;
 }
 
@@ -92,6 +110,8 @@ void USampleBasedAudioComponent::HandleSlide(
     float                 NormalForce,
     FVector               ContactPoint)
 {
+    if (!bListenerEnabled) return;
+    
     if (!bScrapeInitialised)
         InitScrapeAudio();
 
@@ -157,12 +177,10 @@ void USampleBasedAudioComponent::HandleSlide(
 
 void USampleBasedAudioComponent::EnableListener()
 {
-    ImpactComp->OnSampleBasedImpact.AddDynamic(this, &USampleBasedAudioComponent::HandleImpact);
-    ImpactComp->OnSampleBasedSlide.AddDynamic(this,  &USampleBasedAudioComponent::HandleSlide);
+    bListenerEnabled = true;
 }
 
 void USampleBasedAudioComponent::DisableListener()
 {
-    ImpactComp->OnSampleBasedImpact.RemoveDynamic(this, &USampleBasedAudioComponent::HandleImpact);
-    ImpactComp->OnSampleBasedSlide.RemoveDynamic(this,  &USampleBasedAudioComponent::HandleSlide);
+    bListenerEnabled = false;
 }

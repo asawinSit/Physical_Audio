@@ -46,8 +46,8 @@ void UModalMetaSoundBridge::BeginPlay()
         return;
     }
 
-    //ImpactComp->OnModalImpact.AddDynamic(this, &UModalMetaSoundBridge::HandleImpact);
-   // ImpactComp->OnModalSlide.AddDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
+    ImpactComp->OnModalImpact.AddDynamic(this, &UModalMetaSoundBridge::HandleImpact);
+    ImpactComp->OnModalSlide.AddDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
 
     UE_LOG(LogTemp, Log,
         TEXT("[ModalBridge] '%s' ready (v2 — continuous resonator bank)"),
@@ -90,7 +90,8 @@ void UModalMetaSoundBridge::HandleImpact(
     FVector               ImpactNormal)
 {
     if (!ModalSoundAsset || !DataAsset || !ImpactComp) return;
-
+    if (!bListenerEnabled) return;
+    
     TArray<float> Amplitudes = ImpactComp->ComputeModeAmplitudes(
         VertexIndex, KineticEnergy, RelativeSpeed, ImpactNormal);
 
@@ -256,7 +257,8 @@ void UModalMetaSoundBridge::HandleSlide(
     int32                 VertexIndex)
 {
     if (!ScrapeSoundAsset || !DataAsset || !ImpactComp) return;
- 
+    if (!bListenerEnabled) return;
+    
     if (!bScrapeInitialised)
         InitScrapeAudio(DataAsset);
  
@@ -377,12 +379,10 @@ void UModalMetaSoundBridge::InitScrapeAudio(UModalSoundDataAsset* DataAsset)
 
 void UModalMetaSoundBridge::EnableListener()
 {
-    ImpactComp->OnModalImpact.AddDynamic(this, &UModalMetaSoundBridge::HandleImpact);
-    ImpactComp->OnModalSlide.AddDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
+    bListenerEnabled = true;
 }
 
 void UModalMetaSoundBridge::DisableListener()
 {
-    ImpactComp->OnModalImpact.RemoveDynamic(this, &UModalMetaSoundBridge::HandleImpact);
-    ImpactComp->OnModalSlide.RemoveDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
+    bListenerEnabled = false;
 }
