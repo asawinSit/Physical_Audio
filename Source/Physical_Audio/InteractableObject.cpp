@@ -49,17 +49,21 @@ void AInteractableObject::Tick(float DeltaTime)
 
 void AInteractableObject::ToggleSoundImplementation(bool bUseSampleBasedAudio)
 {
-	this->bIsSampleBased = bUseSampleBasedAudio;
-	if (this->bIsSampleBased)
+	bIsSampleBased = bUseSampleBasedAudio;
+
+	GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
 	{
-		ModalAudioComp->DisableListener();
-		SampleBasedAudioComp->EnableListener();
-	}
-	else
-	{
-		ModalAudioComp->EnableListener();
-		SampleBasedAudioComp->DisableListener();
-	}
+		if (bIsSampleBased)
+		{
+			ModalAudioComp->DisableListener();
+			SampleBasedAudioComp->EnableListener();
+		}
+		else
+		{
+			ModalAudioComp->EnableListener();
+			SampleBasedAudioComp->DisableListener();
+		}
+	});
 }
 
 void AInteractableObject::SetupDefaultComponents()
@@ -82,5 +86,18 @@ void AInteractableObject::SetupDefaultComponents()
 		ModalAudioComp->AttenuationSettings = DefaultModalAttenuation;
 		ModalAudioComp->ScrapeSoundAsset = DefaultScrapeSoundAsset;
 		ModalAudioComp->ScrapeAttenuationSettings = DefaultScrapeAttenuation;
+	}
+	// Load MetaSound assets
+	UMetaSoundSource* DefaultSampleBasedImpactSoundAsset = LoadObject<UMetaSoundSource>(
+		nullptr, TEXT("/Game/Audio/MS_SampleBasedImpact.MS_SampleBasedImpact"));
+	UMetaSoundSource* DefaultSampleBasedScrapeSoundAsset = LoadObject<UMetaSoundSource>(
+		nullptr, TEXT("/Game/Audio/MS_SampleBasedScrape.MS_SampleBasedScrape"));
+
+	// Assign defaults to the audio component if it exists
+	if (SampleBasedAudioComp)
+	{
+		SampleBasedAudioComp->SoundAsset = DefaultSampleBasedImpactSoundAsset;
+		SampleBasedAudioComp->ScrapeSoundAsset = DefaultSampleBasedScrapeSoundAsset;
+	
 	}
 }
