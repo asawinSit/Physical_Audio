@@ -72,6 +72,22 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
     int32,                 ClosestVertex
 );
 
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+	FOnSampleBasedImpact,
+	FVector,               ImpactPoint,
+	float,                 KineticEnergy,
+	float,                 RelativeSpeed,      // normal component only
+	FVector,               ImpactNormal
+);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+	FOnSampleBasedSlide,
+	float,                 TangentialSpeed,
+	float,                 NormalForce,
+	FVector,               ContactPoint
+);
+
 UCLASS(ClassGroup=(Audio), meta=(BlueprintSpawnableComponent),
        DisplayName="Modal Impact Component")
 class PHYSICAL_AUDIO_API UModalImpactComponent : public UActorComponent
@@ -213,6 +229,12 @@ public:
 
     UPROPERTY(BlueprintAssignable, Category="Modal Sound")
     FOnModalSlide OnModalSlide;
+	
+	UPROPERTY(BlueprintAssignable, Category="SampleBased Sound")
+	FOnSampleBasedImpact OnSampleBasedImpact;
+
+	UPROPERTY(BlueprintAssignable, Category="SampleBased Sound")
+	FOnSampleBasedSlide OnSampleBasedSlide;
 
     // ── PUBLIC API ─────────────────────────────────────────────────────────
 

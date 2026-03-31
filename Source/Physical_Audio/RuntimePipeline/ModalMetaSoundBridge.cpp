@@ -47,8 +47,8 @@ void UModalMetaSoundBridge::BeginPlay()
         return;
     }
 
-    ImpactComp->OnModalImpact.AddDynamic(this, &UModalMetaSoundBridge::HandleImpact);
-    ImpactComp->OnModalSlide.AddDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
+    //ImpactComp->OnModalImpact.AddDynamic(this, &UModalMetaSoundBridge::HandleImpact);
+   // ImpactComp->OnModalSlide.AddDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
 
     UE_LOG(LogTemp, Log,
         TEXT("[ModalBridge] '%s' ready (v2 — continuous resonator bank)"),
@@ -392,4 +392,16 @@ void UModalMetaSoundBridge::InitScrapeAudio(UModalSoundDataAsset* DataAsset)
                  "Assign MS_ModalScrape_v2 to ScrapeSoundAsset."),
             *GetOwner()->GetName());
     }
+}
+
+void UModalMetaSoundBridge::EnableListener()
+{
+    ImpactComp->OnModalImpact.AddDynamic(this, &UModalMetaSoundBridge::HandleImpact);
+    ImpactComp->OnModalSlide.AddDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
+}
+
+void UModalMetaSoundBridge::DisableListener()
+{
+    ImpactComp->OnModalImpact.RemoveDynamic(this, &UModalMetaSoundBridge::HandleImpact);
+    ImpactComp->OnModalSlide.RemoveDynamic(this,  &UModalMetaSoundBridge::HandleSlide);
 }

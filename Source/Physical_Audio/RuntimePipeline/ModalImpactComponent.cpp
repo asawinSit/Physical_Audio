@@ -158,6 +158,8 @@ void UModalImpactComponent::TickComponent(
             OnModalSlide.Broadcast(
                 SmoothedSlideSpeed, NormalForce,
                 LastContactPoint, ModalDataAsset, LastSlideVertex);
+            
+            OnSampleBasedSlide.Broadcast(SmoothedSlideSpeed, NormalForce, LastContactPoint);
         }
         else
         {
@@ -169,6 +171,8 @@ void UModalImpactComponent::TickComponent(
                 // Broadcast one final tick at zero speed so the bridge can fade out
                 OnModalSlide.Broadcast(
                     0.f, 0.f, LastContactPoint, ModalDataAsset, LastSlideVertex);
+                
+                OnSampleBasedSlide.Broadcast(0.f, 0.f, LastContactPoint);
             }
         }
     }
@@ -181,6 +185,7 @@ void UModalImpactComponent::TickComponent(
             SmoothedSlideSpeed = 0.f;
             OnModalSlide.Broadcast(
                 0.f, 0.f, LastContactPoint, ModalDataAsset, LastSlideVertex);
+            OnSampleBasedSlide.Broadcast(0.f, 0.f, LastContactPoint);
         }
     }
 }
@@ -414,4 +419,6 @@ void UModalImpactComponent::OnHit(
 
     OnModalImpact.Broadcast(
         Hit.ImpactPoint, KE, NormalSpeed, Vertex, ModalDataAsset, Hit.ImpactNormal);
+    
+    OnSampleBasedImpact.Broadcast(Hit.ImpactPoint, KE, NormalSpeed, Hit.ImpactNormal);
 }
