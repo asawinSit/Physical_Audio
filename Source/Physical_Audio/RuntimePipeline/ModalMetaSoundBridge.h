@@ -155,17 +155,6 @@ public:
               meta=(ClampMin="0.1"))
     float MaxScrapeSpeed = 300.0f;
 
-    /**
-     * How long (seconds) to ramp scrape gain from 0→full after an impact.
-     * Prevents the abrupt overlap when an object simultaneously impacts and
-     * begins sliding. 40ms is short enough that it's inaudible as a gap but
-     * long enough to separate the impact transient from the scrape onset.
-     * Increase for heavier objects that bounce slowly (up to ~0.1s).
-     */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound|Scrape",
-              meta=(ClampMin="0.0", ClampMax="0.5"))
-    float PostImpactSuppressTime = 0.1f;
-
     // ── PERCEPTUAL TUNING (optional, default OFF) ─────────────────────────
 
     /**
@@ -231,4 +220,6 @@ private:
     // smooths the final gain value sent to MetaSound, absorbing sudden
     // speed jumps from impact/slide classification thrashing on long objects.
     float SmoothedScrapeGain = 0.f;
+
+	bool bSlideActiveThisFrame = false;
 };

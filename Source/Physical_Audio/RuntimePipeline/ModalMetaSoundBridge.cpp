@@ -30,7 +30,6 @@
 
 UModalMetaSoundBridge::UModalMetaSoundBridge()
 {
-    // Tick needed to advance TimeSinceLastImpact for post-impact scrape suppression.
     PrimaryComponentTick.bCanEverTick = true;
 }
 
@@ -67,6 +66,16 @@ void UModalMetaSoundBridge::TickComponent(float DeltaTime, ELevelTick TickType,
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
     TimeSinceLastImpact += DeltaTime;
+
+    if (bScrapeInitialised && ScrapeAudio && SmoothedScrapeGain > 0.001f)
+    {
+        if (!bSlideActiveThisFrame)
+        {
+            SmoothedScrapeGain = FMath::Lerp(SmoothedScrapeGain, 0.f, ScrapeGainSmoothing);
+            ScrapeAudio->SetFloatParameter(FName("ScrapeGain"), SmoothedScrapeGain);
+        }
+        bSlideActiveThisFrame = false;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,43 +256,40 @@ void UModalMetaSoundBridge::HandleSlide(
     int32                 VertexIndex)
 {
     if (!ScrapeSoundAsset || !DataAsset || !ImpactComp) return;
-
+ 
     if (!bScrapeInitialised)
         InitScrapeAudio(DataAsset);
-
+ 
     if (!ScrapeAudio) return;
-
+ 
+    bSlideActiveThisFrame = true;  // tell Tick not to run fade-out this frame
+ 
     ScrapeAudio->SetWorldLocation(ContactPoint);
-
-    float SpeedNorm      = FMath::Clamp(TangentialSpeed / MaxScrapeSpeed, 0.f, 1.f);
-    float TargetGain     = SpeedNorm * ScrapeGainScale;
-
-    // Post-impact scrape suppression: ramp from 0→full over PostImpactSuppressTime.
-    if (TimeSinceLastImpact < PostImpactSuppressTime)
-    {
-        float Ramp = FMath::Clamp(TimeSinceLastImpact / PostImpactSuppressTime, 0.f, 1.f);
-        TargetGain *= Ramp;
-    }
-
-    // Bridge-side one-pole gain smoothing.
-    // ModalImpactComponent already applies SlideSmoothing on speed, but that
-    // does not protect against sudden gain jumps caused by impact/slide
-    // classification thrashing — e.g. a long plank sliding on one end while
-    // the other end hits a wall: OnHit fires at NormalFraction > threshold
-    // (impact), suppresses the scrape via TimeSinceLastImpact, then the next
-    // tick resumes the scrape at full gain. The result is a sharp cut/pop.
-    // This second smoothing filter in the bridge catches those jumps and
-    // ensures gain always changes at a rate controlled by ScrapeGainSmoothing.
+ 
+    float SpeedNorm  = FMath::Clamp(TangentialSpeed / MaxScrapeSpeed, 0.f, 1.f);
+    float TargetGain = SpeedNorm * ScrapeGainScale;
+ 
+    // Impact+scrape coexistence: do NOT suppress scrape gain after impacts.
+    // The impact AudioComponent and ScrapeAudio are separate UAudioComponents
+    // and mix independently. Suppressing scrape during impacts created a dead
+    // gap — silent for PostImpactSuppressTime — which broke the feel of an
+    // object hitting and then continuing to slide. Removing the suppression
+    // lets the ring and the scrape overlap naturally.
+    //
+    // The bridge-side SlideSuppressWindow in ModalImpactComponent (60ms) still
+    // prevents the slide *classifier* from immediately re-entering slide state
+    // during the impact frame, so there is no double-trigger problem.
+    // Bridge-side one-pole gain smoothing handles any remaining gain jumps.
     SmoothedScrapeGain = FMath::Lerp(SmoothedScrapeGain, TargetGain, ScrapeGainSmoothing);
     float CurrentScrapeGain = SmoothedScrapeGain;
-
+ 
     TArray<float> ScrapeAmps = ImpactComp->ComputeScrapeAmplitudes(
         VertexIndex, TangentialSpeed, NormalForce);
-
+ 
     int32 N = FMath::Min(DataAsset->Modes.Num(), MaxScrapeModes);
     TArray<float> Freqs, Amps, Damps;
     Freqs.SetNum(N); Amps.SetNum(N); Damps.SetNum(N);
-
+ 
     for (int32 k = 0; k < N; ++k)
     {
         const FModalMode& M = DataAsset->Modes[k];
@@ -291,20 +297,12 @@ void UModalMetaSoundBridge::HandleSlide(
         Damps[k] = M.DampingRatio;
         Amps[k]  = ScrapeAmps.IsValidIndex(k) ? ScrapeAmps[k] : 0.f;
     }
-
+ 
     // Rolloff 0.20: mode 1=1.00x, mode 2=0.82x, mode 4=0.45x, mode 8=0.20x.
     // Keeps modes 1-4 audible — multi-harmonic friction texture.
     for (int32 k = 0; k < N; ++k)
         Amps[k] *= FMath::Exp(-0.20f * static_cast<float>(k));
-
-    // DampingRatios sent as-is (FEM values, no multiplier).
-    // ScrapeDampingScale=4.0 was tried and reverted. The scrape "heaviness"
-    // was caused by SVF_2 Resonance=4.0 in MS_ModalScrape creating a large
-    // resonant spike at ScrapeFilterFc (106-174Hz for slow wood chair slides).
-    // Fix: set SVF_2 Resonance to 1.5 in the MetaSound graph (see setup guide).
-
-
-
+ 
     // Update the continuously-running MetaSound. NO TRIGGER.
     // The resonator bank picks up parameter changes on the next audio buffer.
     ScrapeAudio->SetFloatArrayParameter(FName("ScrapeFrequencies"), Freqs);
@@ -312,23 +310,7 @@ void UModalMetaSoundBridge::HandleSlide(
     ScrapeAudio->SetFloatArrayParameter(FName("ScrapeAmplitudes"),  Amps);
     ScrapeAudio->SetIntParameter       (FName("NumModes"),          N);
     ScrapeAudio->SetFloatParameter     (FName("ScrapeGain"),        CurrentScrapeGain);
-    // ScrapeSpeed no longer sent — Fc is computed in bridge and sent as ScrapeFilterFc.
 
-    // ScrapeFilterFc: computed here so the absolute-Hz floor works correctly
-    // regardless of the object's f1. The MetaSound graph wires this directly
-    // to the bandpass SVF Cutoff Frequency pin — no math nodes in the graph.
-    //
-    // Formula: Fc = clamp(f1 * (0.15 + SpeedNorm*0.85), 80, f1)
-    //   - floor at 80 Hz: prevents near-DC cutoff on low-f1 objects (planks
-    //     at f1=150 Hz had Fc=22 Hz at slow speed → resonators got zero excitation)
-    //   - ceiling at f1: prevents exciting high modes at fast speed
-    //     (caused screeching on metal ξ=0.002 objects)
-    //   - 0.15 offset: ensures some excitation even when SpeedNorm≈0
-    //
-    // GRAPH CHANGE REQUIRED: In MS_ModalScrape, remove the Multiply×0.85,
-    // Add+0.15, Multiply×ScrapeBaseFreq chain and the ScrapeBaseFreq input.
-    // Add a new Float input "ScrapeFilterFc" (default 440) and wire it
-    // directly to the bandpass SVF's "Cutoff Frequency" pin.
     const float f1 = (N > 0 && DataAsset->Modes.IsValidIndex(0))
         ? DataAsset->Modes[0].Frequency : 440.f;
     const float Fc = FMath::Clamp(
@@ -336,7 +318,6 @@ void UModalMetaSoundBridge::HandleSlide(
         80.f,
         f1);
     ScrapeAudio->SetFloatParameter(FName("ScrapeFilterFc"), Fc);
-    // ^^^ No SetTriggerParameter here. Ever. That was the v1 bug.
 }
 
 
