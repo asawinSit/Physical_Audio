@@ -177,7 +177,7 @@ public:
      * Default 1.0.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound",
-              meta=(ClampMin="0.05", ClampMax="2.0"))
+              meta=(ClampMin="0.001", ClampMax="2.0"))
     float ContactDurationScale = 1.0f;
 
     /**
