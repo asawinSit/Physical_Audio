@@ -173,6 +173,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound|Tuning")
     bool bApplyPerceptualTuning = false;
 	
+	
+	bool bListenerEnabled = false;
+	
 	void EnableListener();
 	void DisableListener();
 

@@ -51,7 +51,7 @@ public:
 	void DisableListener();
 	
 
-
+	bool bListenerEnabled = false;
 protected:
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -84,4 +84,8 @@ private:
     float TimeSinceLastImpact = 9999.f;
 	
     float SmoothedScrapeGain = 0.f;
+	
+	bool bSlideActiveThisFrame = false;
+	
+	
 };
