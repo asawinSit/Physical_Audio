@@ -144,7 +144,7 @@ public:
     /** Overall scrape volume multiplier. Default 0.5 (quieter than impact). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound|Scrape",
               meta=(ClampMin="0.0", ClampMax="4.0"))
-    float ScrapeGainScale = 0.5f;
+    float ScrapeGainScale = 0.2f;
 
     /**
      * Maximum speed (m/s) that maps to full scrape amplitude.
@@ -153,7 +153,7 @@ public:
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound|Scrape",
               meta=(ClampMin="0.1"))
-    float MaxScrapeSpeed = 3.0f;
+    float MaxScrapeSpeed = 300.0f;
 
     /**
      * How long (seconds) to ramp scrape gain from 0→full after an impact.
@@ -164,7 +164,7 @@ public:
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound|Scrape",
               meta=(ClampMin="0.0", ClampMax="0.5"))
-    float PostImpactSuppressTime = 0.04f;
+    float PostImpactSuppressTime = 0.1f;
 
     // ── PERCEPTUAL TUNING (optional, default OFF) ─────────────────────────
 
@@ -183,6 +183,10 @@ public:
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound|Tuning")
     bool bApplyPerceptualTuning = false;
+	
+	void EnableListener();
+	void DisableListener();
+
 
 protected:
     virtual void BeginPlay() override;
