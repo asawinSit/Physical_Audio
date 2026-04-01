@@ -23,13 +23,11 @@ AInteractableObject::AInteractableObject()
 	Mesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	Mesh->SetCollisionObjectType(ECC_PhysicsBody);
 	
-	
 	ImpactComp = CreateDefaultSubobject<UModalImpactComponent>(TEXT("Modal Impact Component"));
 	ModalAudioComp = CreateDefaultSubobject<UModalMetaSoundBridge>(TEXT("Modal MetaSound Bridge"));
 	SampleBasedAudioComp = CreateDefaultSubobject<USampleBasedAudioComponent>(TEXT("SampleBased Audio Component"));
 	
 	SetupDefaultComponents();
-	
 }
 
 // Called when the game starts or when spawned
