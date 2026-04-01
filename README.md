@@ -82,6 +82,7 @@ The offline pipeline runs inside Unreal Engine's bundled Python interpreter. You
 | `Left Mouse Button` (release) | Release object |
 | `Right Mouse Button` (hold, while grabbing) | Rotate held object |
 | `Right Mouse Button` (release) | Stop rotating |
+| `E` (press, while grabbing) | Throw held object |
 
 ---
 
