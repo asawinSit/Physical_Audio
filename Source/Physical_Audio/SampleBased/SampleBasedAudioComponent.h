@@ -44,6 +44,9 @@ public:
               meta=(ClampMin="0.0", ClampMax="0.5"))
     float PostImpactSuppressTime = 0.04f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SampleBased Sound")
+	TArray<UObject*> SoundWaves;
+
 	
 	USampleBasedAudioComponent();
 	

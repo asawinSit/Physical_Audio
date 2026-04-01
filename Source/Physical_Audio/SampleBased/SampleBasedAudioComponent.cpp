@@ -92,8 +92,10 @@ void USampleBasedAudioComponent::HandleImpact(
             TEXT("[USampleBasedAudioComponent] SpawnSoundAtLocation returned null."));
         return;
     }
-
-    // Pass energy and angle to Metasound/FMOD parameters if needed
+    FAudioParameter SoundsParam;
+    SoundsParam.ParamName = FName("Sounds");
+    SoundsParam.ArrayObjectParam = SoundWaves; // TArray<USoundBase*>
+    Audio->SetParameters({ SoundsParam });
     Audio->SetFloatParameter(FName("KineticEnergy"), KineticEnergy);
     Audio->SetFloatParameter(FName("DirectFactor"),  DirectFactor);
 
