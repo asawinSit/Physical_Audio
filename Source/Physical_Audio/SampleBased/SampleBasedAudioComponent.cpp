@@ -53,6 +53,8 @@ void USampleBasedAudioComponent::HandleImpact(
     FVector   ImpactNormal)
 {
     if (!bListenerEnabled) return;
+    
+    if (ImpactSoundWaves.IsEmpty()) return;
     // --- Gain from relative speed (unchanged) ---
     float ContactGain = FMath::Clamp(
         FMath::Sqrt(RelativeSpeed / 4.0f),
@@ -65,14 +67,14 @@ void USampleBasedAudioComponent::HandleImpact(
     float       EnergyAlpha  = FMath::Clamp(KineticEnergy / MaxKE, 0.f, 1.f);
 
     // How "glancing" the hit is: 1 = head-on, 0 = fully glancing
-    float       DirectFactor = FMath::Abs(FVector::DotProduct(ImpactNormal.GetSafeNormal(),
-                                                               FVector::UpVector));
+   // float       DirectFactor = FMath::Abs(FVector::DotProduct(ImpactNormal.GetSafeNormal(),
+                                                             //  FVector::UpVector));
 
     // Blend ContactGain with energy so a harder hit is louder
     float FinalVolume = FMath::Clamp(ContactGain * (0.5f + 0.5f * EnergyAlpha), 0.15f, 1.f);
 
     // Optionally pitch up on glancing hits (DirectFactor near 0 → higher pitch)
-    float PitchScale  = FMath::Lerp(1.3f, 1.0f, DirectFactor);
+   // float PitchScale  = FMath::Lerp(1.3f, 1.0f, DirectFactor);
 
     UAudioComponent* Audio = UGameplayStatics::SpawnSoundAtLocation(
         GetWorld(),
@@ -80,7 +82,7 @@ void USampleBasedAudioComponent::HandleImpact(
         ImpactPoint,
         FRotator::ZeroRotator,
         FinalVolume,   // VolumeMultiplier  ← was hardcoded 1.f
-        PitchScale,    // PitchMultiplier   ← was hardcoded 1.f
+        1,    // PitchMultiplier   ← was hardcoded 1.f
         0.f,
         nullptr,
         nullptr,
@@ -92,15 +94,18 @@ void USampleBasedAudioComponent::HandleImpact(
             TEXT("[USampleBasedAudioComponent] SpawnSoundAtLocation returned null."));
         return;
     }
-    FAudioParameter SoundsParam;
-    SoundsParam.ParamName = FName("Sounds");
-    SoundsParam.ArrayObjectParam = SoundWaves; // TArray<USoundBase*>
-    Audio->SetParameters({ SoundsParam });
+    //FAudioParameter SoundsParam;
+    //SoundsParam.ParamName = FName("Sounds");
+    //.ArrayObjectParam = SoundWaves; // TArray<USoundBase*>
+    //Audio->SetParameters({ SoundsParam });
+   
+  
+    Audio->SetObjectArrayParameter(FName("Sounds"), ImpactSoundWaves);
+    
     Audio->SetFloatParameter(FName("KineticEnergy"), KineticEnergy);
-    Audio->SetFloatParameter(FName("DirectFactor"),  DirectFactor);
+    //Audio->SetFloatParameter(FName("DirectFactor"),  DirectFactor);
 
     Audio->SetTriggerParameter(FName("Trigger"));  // MUST be last
-
     TimeSinceLastImpact = 0.f;
 }
 
@@ -113,6 +118,7 @@ void USampleBasedAudioComponent::HandleSlide(
     FVector               ContactPoint)
 {
     if (!bListenerEnabled) return;
+    if(!ScrapeSoundAsset) return;
     
     if (!bScrapeInitialised)
         InitScrapeAudio();
@@ -143,6 +149,7 @@ void USampleBasedAudioComponent::HandleSlide(
         f1 * (0.15f + SpeedNorm * 0.85f),
         80.f,
         f1);
+    ScrapeAudio->SetWaveParameter(FName("Sound"), ScrapeSoundWave);
     ScrapeAudio->SetFloatParameter(FName("ScrapeFilterFc"), Fc);
     ScrapeAudio->SetFloatParameter     (FName("ScrapeGain"),        CurrentScrapeGain);
     // ^^^ No SetTriggerParameter here. Ever. That was the v1 bug.
