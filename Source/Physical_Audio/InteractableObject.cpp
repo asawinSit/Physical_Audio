@@ -47,20 +47,17 @@ void AInteractableObject::Tick(float DeltaTime)
 
 void AInteractableObject::ToggleSoundImplementation(bool bUseSampleBasedAudio)
 {
-	bIsSampleBased = bUseSampleBasedAudio;
-	GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
+	
+	if (bUseSampleBasedAudio)
 	{
-		if (bIsSampleBased)
-		{
-			ModalAudioComp->DisableListener();
-			SampleBasedAudioComp->EnableListener();
-		}
-		else
-		{
-			ModalAudioComp->EnableListener();
-			SampleBasedAudioComp->DisableListener();
-		}
-	});
+		ModalAudioComp->DisableListener();
+		SampleBasedAudioComp->EnableListener();
+	}
+	else
+	{
+		ModalAudioComp->EnableListener();
+		SampleBasedAudioComp->DisableListener();
+	}
 }
 
 void AInteractableObject::SetupDefaultComponents()
