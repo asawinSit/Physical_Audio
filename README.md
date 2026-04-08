@@ -64,8 +64,8 @@ The offline pipeline runs inside Unreal Engine's bundled Python interpreter. You
 ### 2. Assign to an Actor
 
 1. Make your blueprint actor inherit from **InteractableObject**
-2. Assign the generated `ModalSoundDataAsset` to the Modal Impact Component
-3. Adjust the parameters in Modal Impact Component for the desired sound
+2. Assign the generated `ModalSoundDataAsset` to the `ModalImpactComponent` 
+3. Adjust the parameters in `ModalImpactComponent` for the desired sound
 4. Play — impact and sliding sounds will be generated procedurally on collision
 5. 
 ---
