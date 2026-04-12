@@ -233,6 +233,19 @@ void UModalMetaSoundBridge::HandleImpact(
     const float CrackFc = FMath::Clamp(f1 * 3.0f, 800.f, 4000.f);
     Audio->SetFloatParameter(FName("CrackFc"), CrackFc);
 
+    float MinSpeed = 20.0f;
+    float MaxSpeed = 300.0f;
+
+    float SpeedNorm = FMath::Clamp(
+        (RelativeSpeed - MinSpeed) / (MaxSpeed - MinSpeed),
+        0.0f, 1.0f);
+
+    // perceptual shaping
+    float Loudness = FMath::Pow(SpeedNorm, 0.4f);
+
+    float DynamicVolume = MasterGain * FMath::Clamp(FMath::Pow(RelativeSpeed / 50.0f, 0.6f), 0.03f, 3.0f);
+    Audio->SetFloatParameter(FName("ImpactLoudness"), DynamicVolume);
+
     Audio->SetTriggerParameter(FName("Trigger"));  // MUST be last
 
     // Suppress scrape gain for a short window after impact.
