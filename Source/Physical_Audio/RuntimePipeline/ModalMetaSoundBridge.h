@@ -155,6 +155,10 @@ public:
               meta=(ClampMin="0.1"))
     float MaxScrapeSpeed = 300.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Modal Sound|Scrape",
+		  meta=(ClampMin="0.1"))
+	float RefSpeed = 200.0f;
+
     // ── PERCEPTUAL TUNING (optional, default OFF) ─────────────────────────
 
     /**
