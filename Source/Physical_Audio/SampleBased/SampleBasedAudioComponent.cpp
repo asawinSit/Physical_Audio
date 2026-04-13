@@ -136,7 +136,7 @@ void USampleBasedAudioComponent::HandleSlide(
    // TArray<float> ScrapeAmps = ImpactComp->ComputeScrapeAmplitudes(
   //      VertexIndex, TangentialSpeed, NormalForce);
     
-    const float f1 = 44.f;
+    const float f1 = 440.f;
     const float Fc = FMath::Clamp(
         f1 * (0.15f + SpeedNorm * 0.85f),
         80.f,
