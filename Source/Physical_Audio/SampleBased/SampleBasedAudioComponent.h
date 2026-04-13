@@ -22,7 +22,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SampleBased Sound|Impact",
               meta=(ClampMin="0.0", ClampMax="8.0"))
     float MasterGain = 1.0f;
-	
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SampleBased Sound|Scrape",
+			meta=(ClampMin="0.0", ClampMax="10.0"))
+	float MasterScrapeGain = 1.0f;
    
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SampleBased Sound|Scrape",
               meta=(ClampMin="0.01", ClampMax="1.0"))
@@ -39,10 +42,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SampleBased Sound|Scrape",
               meta=(ClampMin="0.1"))
     float MaxScrapeSpeed = 3.0f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SampleBased Sound|Scrape",
-              meta=(ClampMin="0.0", ClampMax="0.5"))
-    float PostImpactSuppressTime = 0.04f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SampleBased Sound|Impact")
 	TArray<UObject*> ImpactSoundWaves;

@@ -71,7 +71,7 @@ void USampleBasedAudioComponent::HandleImpact(
                                                              //  FVector::UpVector));
 
     // Blend ContactGain with energy so a harder hit is louder
-    float FinalVolume = FMath::Clamp(ContactGain * (0.5f + 0.5f * EnergyAlpha), 0.15f, 1.f);
+    float FinalVolume = MasterGain * FMath::Clamp(ContactGain * (0.5f + 0.5f * EnergyAlpha), 0.15f, 1.f);
 
     // Optionally pitch up on glancing hits (DirectFactor near 0 → higher pitch)
    // float PitchScale  = FMath::Lerp(1.3f, 1.0f, DirectFactor);
@@ -129,15 +129,7 @@ void USampleBasedAudioComponent::HandleSlide(
 
     float SpeedNorm      = FMath::Clamp(TangentialSpeed / MaxScrapeSpeed, 0.f, 1.f);
     float TargetGain     = SpeedNorm * ScrapeGainScale;
-
-    // Post-impact scrape suppression: ramp from 0→full over PostImpactSuppressTime.
-    if (TimeSinceLastImpact < PostImpactSuppressTime)
-    {
-        float Ramp = FMath::Clamp(TimeSinceLastImpact / PostImpactSuppressTime, 0.f, 1.f);
-        TargetGain *= Ramp;
-    }
-
-  
+    
     SmoothedScrapeGain = FMath::Lerp(SmoothedScrapeGain, TargetGain, ScrapeGainSmoothing);
     float CurrentScrapeGain = SmoothedScrapeGain;
 
@@ -177,7 +169,7 @@ void USampleBasedAudioComponent::HandleSlide(
             // Prime silent until first slide event
             ScrapeAudio->SetFloatParameter(FName("ScrapeGain"),  0.f);
             ScrapeAudio->SetFloatParameter(FName("ScrapeSpeed"), 0.f);
-         
+            ScrapeAudio->SetFloatParameter(FName("MasterGain"), MasterScrapeGain);  
             bScrapeInitialised = true;
         }
     
