@@ -107,23 +107,7 @@ void UModalMetaSoundBridge::HandleImpact(
         Amps[k]  = Amplitudes.IsValidIndex(k) ? Amplitudes[k] : 0.f;
     }
 
-    // ── Exponential mode rolloff ────────────────────────────────────────
-    // Taper higher modes so the fundamental dominates perceptually while
-    // keeping modes 2-6 audible enough to add spectral richness.
-    //
-    // Rolloff 0.12 (was 0.20, was 0.35):
-    //   mode 1=1.00×, mode 2=0.89×, mode 3=0.70×, mode 4=0.62×, mode 6=0.49×
-    //
-    // WHY reduced from 0.20:
-    //   The shell radiation model assigns low GlobalAmplitude to even-numbered
-    //   plate bending modes (e.g. (2,1) has two antinodes that partially cancel
-    //   in the mean). Combined with a 0.20 rolloff, modes 2-4 become inaudible
-    //   → the sound is dominated by the single fundamental → "cork" or "hollow"
-    //   quality. At 0.12, modes 2-4 retain 89%/70%/62% amplitude even before
-    //   the radiation weighting, ensuring multi-partial character.
-    //
-    //   Risk of too-flat rolloff: noise-like buzzy attack. At 0.12 the ratio
-    //   mode10/mode1 = exp(-0.12×9) = 0.34 — still clearly tapered.
+  
     for (int32 k = 0; k < N; ++k)
         Amps[k] *= FMath::Exp(-0.12f * static_cast<float>(k));
 
@@ -136,23 +120,6 @@ void UModalMetaSoundBridge::HandleImpact(
         for (float& F : Freqs) F *= PitchScale;
     }
 
-    // ContactGain → drives AudioMixer Gain 1 in MS_ModalImpact (the
-    // 3500Hz BPF noise crack layer, AD envelope attack=0.5ms/decay=8ms).
-    // Higher = louder, crisper attack transient.
-    //
-    // Formula: sqrt(speed/4), clamped [0.15, 0.95]
-    //
-    // WHY speed-only (hardness removed):
-    //   The 3500Hz crack encodes impact velocity — fast = loud crack regardless
-    //   of material. Material identity is encoded by the modal content (modes,
-    //   damping) and by ThudGain (300Hz body layer) below.
-    //   Previous formula sqrt(speed/8)*sqrt(hardness): wood at 3m/s → 0.35,
-    //   which after Power(0.4) = 0.66. But at 1m/s → 0.15 → Power(0.4) = 0.46
-    //   which made gentle wood impacts flat and undifferentiated.
-    //   sqrt(speed/4): 1m/s → 0.50 → Power=0.76; 3m/s → 0.87 → Power=0.94.
-    //   Every speed produces a meaningfully distinct crack level.
-    //
-    // The graph raises this to 0.4 power (Power node) at the mixer.
     float ContactGain = FMath::Clamp(
         FMath::Sqrt(RelativeSpeed / 4.0f),
         0.15f, 0.95f);
@@ -241,7 +208,6 @@ void UModalMetaSoundBridge::HandleImpact(
         0.0f, 1.0f);
 
     // perceptual shaping
-    float Loudness = FMath::Pow(SpeedNorm, 0.4f);
 
     float DynamicVolume = MasterGain * FMath::Clamp(FMath::Pow(RelativeSpeed / 50.0f, 0.6f), 0.03f, 3.0f);
     Audio->SetFloatParameter(FName("ImpactLoudness"), DynamicVolume);

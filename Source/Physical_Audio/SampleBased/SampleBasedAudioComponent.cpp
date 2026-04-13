@@ -55,33 +55,13 @@ void USampleBasedAudioComponent::HandleImpact(
     if (!bListenerEnabled) return;
     
     if (ImpactSoundWaves.IsEmpty()) return;
-    // --- Gain from relative speed (unchanged) ---
-    float ContactGain = FMath::Clamp(
-        FMath::Sqrt(RelativeSpeed / 4.0f),
-        0.15f, 0.95f);
-
-    // --- Derive extra modifiers from the new inputs ---
-
-    // Normalise kinetic energy into a 0-1 range; tune MaxKE to your sim's scale
-    const float MaxKE        = 5000.f;
-    float       EnergyAlpha  = FMath::Clamp(KineticEnergy / MaxKE, 0.f, 1.f);
-
-    // How "glancing" the hit is: 1 = head-on, 0 = fully glancing
-   // float       DirectFactor = FMath::Abs(FVector::DotProduct(ImpactNormal.GetSafeNormal(),
-                                                             //  FVector::UpVector));
-
-    // Blend ContactGain with energy so a harder hit is louder
-    float FinalVolume = MasterGain * FMath::Clamp(ContactGain * (0.5f + 0.5f * EnergyAlpha), 0.15f, 1.f);
-
-    // Optionally pitch up on glancing hits (DirectFactor near 0 → higher pitch)
-   // float PitchScale  = FMath::Lerp(1.3f, 1.0f, DirectFactor);
-
+    
     UAudioComponent* Audio = UGameplayStatics::SpawnSoundAtLocation(
         GetWorld(),
         SoundAsset,
         ImpactPoint,
         FRotator::ZeroRotator,
-        FinalVolume,   // VolumeMultiplier  ← was hardcoded 1.f
+       1,   // VolumeMultiplier  ← was hardcoded 1.f
         1,    // PitchMultiplier   ← was hardcoded 1.f
         0.f,
         nullptr,
@@ -94,17 +74,15 @@ void USampleBasedAudioComponent::HandleImpact(
             TEXT("[USampleBasedAudioComponent] SpawnSoundAtLocation returned null."));
         return;
     }
-    //FAudioParameter SoundsParam;
-    //SoundsParam.ParamName = FName("Sounds");
-    //.ArrayObjectParam = SoundWaves; // TArray<USoundBase*>
-    //Audio->SetParameters({ SoundsParam });
-   
+
+    float DynamicVolume = MasterGain * FMath::Clamp(FMath::Pow(RelativeSpeed / 50.0f, 0.6f), 0.03f, 3.0f);
   
     Audio->SetObjectArrayParameter(FName("Sounds"), ImpactSoundWaves);
     
     Audio->SetFloatParameter(FName("KineticEnergy"), KineticEnergy);
-    //Audio->SetFloatParameter(FName("DirectFactor"),  DirectFactor);
 
+    Audio->SetFloatParameter(FName("ImpactLoudness"), DynamicVolume);
+    
     Audio->SetTriggerParameter(FName("Trigger"));  // MUST be last
     TimeSinceLastImpact = 0.f;
 }
